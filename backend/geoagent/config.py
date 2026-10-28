@@ -169,6 +169,10 @@ class Settings:
         self.qa_vector = os.getenv("GEOAGENT_QA_VECTOR", "1").strip().lower() not in {
             "0", "off", "false", "no",
         }
+        # 灰度区是否调用 LLM judge 复核候选（只在 candidates/clarify 时调用）。
+        self.qa_judge = os.getenv("GEOAGENT_QA_JUDGE", "1").strip().lower() not in {
+            "0", "off", "false", "no",
+        }
         self.pgvector_dsn = os.getenv("GEOAGENT_PGVECTOR_DSN", "").strip() or self.pg_dsn
         # 入口验证与用户体系：省域平台 ticket 换本系统登录态。
         # dev=不校验（改造前的开发模式，行为不变）；ticket=校验后按用户隔离会话。

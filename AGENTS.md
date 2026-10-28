@@ -125,11 +125,15 @@ GeoAgent 是一个**通过自然语言对话完成地理空间分析与业务问
   “理解计划”注入自由 SQL，避免静默降级；执行后校验空结果、负值、比例范围、
   净变化=流入−流出、分项合计与区县筛选；回答附口径卡（主体/范围/期次/单位/风险）与
   校验结论，匹配决策写入 `data/qa_match_audit.jsonl`。离线评测（留一别名问法）：
-  自动执行率 10.5%→73.7%（叠加 embedding 向量召回 + RRF 后 94.7%），
-  Top-1 70.2%→100%，误执行 0；独立留出 38 条 65.8%→94.7%、
-  锁定 19 条 73.7%→100%。向量召回默认开启（`GEOAGENT_QA_VECTOR=1`），
-  无 API Key 或调用失败时自动降级为纯规则。评估脚本 `scripts/eval_question_matching.py`
-  （`--vector` 对比向量效果），指标卡生成 `scripts/build_metric_cards.py`。
+  自动执行率 10.5%→73.7%（叠加 embedding 向量召回 + RRF + p(correct) 校准后 93.0%），
+  Top-1 70.2%→100%，误执行 0；独立留出 38 条 65.8%→92.1%、
+  锁定 19 条 73.7%→100%。置信度已校准为 top-1 p(correct)，
+  ECE 约 0.046~0.054（锁定集 0.0538）；灰度区可选 LLM judge 复核候选。
+  向量召回默认开启（`GEOAGENT_QA_VECTOR=1`）、LLM judge 默认开启
+  （`GEOAGENT_QA_JUDGE=1`，只在 candidates/clarify 调用）；无 API Key 或调用失败时
+  自动降级为纯规则。评估脚本 `scripts/eval_question_matching.py`
+  （`--vector` 对比向量效果），校准训练 `scripts/fit_match_calibration.py`，
+  指标卡生成 `scripts/build_metric_cards.py`。
 - **套合入库（前后时相切分 → 一期套合表）**（`overlay/` + `server/overlay_routes.py` +
   前端对话窗口上方的「套合入库」按钮，大弹窗承载、不跳页；`/?view=overlay` 仍可直接访问）：上传后时相（变化监测图斑）、前时相（变更地类图斑）与可选的
   永久基本农田、生态保护红线，在 PostGIS 内按后时相边界切分前时相碎片、挂接母斑属性、
@@ -214,7 +218,7 @@ GeoAgent 是一个**通过自然语言对话完成地理空间分析与业务问
 
 - **服务层**（`server/`）：REST（会话 CRUD、模型切换、发消息）+ WebSocket 流式事件
   （token / route / tool_call / tool_result / artifact / message / error / turn_end）。
-- **验证**：327 个 pytest 用例；7 个 golden 用例在
+- **验证**：330 个 pytest 用例；7 个 golden 用例在
   qwen3.7-max-2026-06-08 下真实跑通（7/7）。本机环境下 4 个 Word/模板相关用例因临时目录
   `os.replace` 报拒绝访问而失败，改动前的干净副本同样失败（环境问题，与代码无关）。
 - **前端骨架**（`frontend/`）：左侧历史会话列表 + 右侧会话窗口；流式展示
@@ -264,7 +268,8 @@ GeoAgent/
 │       │   └── events.py        # 流式事件定义
 │       ├── auth/                # 入口验证与用户体系（票据校验/会话凭据/中间件/签名下载/审计）
 │       ├── datasets.py          # 期次数据集注册表（一张套合表 = 一期数据）
-│       ├── qa_semantics.py      # 语义槽位匹配 + 向量 RRF：查询理解/指标卡/风险决策
+│       ├── qa_semantics.py      # 语义槽位匹配 + 向量 RRF + p(correct) 校准
+│       ├── qa_judge.py          # 灰度区 LLM judge 复核候选
 │       ├── qa_verify.py         # 确定性结果校验（比例/合计/净变化/区县）
 │       ├── stateless.py         # 无状态问答执行（MCP 用：不落会话，只记审计）
 │       ├── mcp_http.py          # MCP 对外接口（Streamable HTTP：ask / 快报 / 期次）
@@ -326,7 +331,7 @@ GeoAgent/
 │       └── style.css            # 全局样式
 ├── skills/                      # 技能目录（每个子目录一个技能：{name}/SKILL.md）
 │   ├── land-report/             # 土地变化监测快报（默认模板 + 统计需求清单）
-│   ├── qa-library/              # 标准问题库 + 语义资产 + 期次（assets/question_library.json、terms.json、metric_cards.json、question_variants.json、question_holdout.json、question_locked.json、datasets.json）
+│   ├── qa-library/              # 标准问题库 + 语义资产 + 期次（assets/question_library.json、terms.json、metric_cards.json、match_calibration.json、question_variants.json、question_holdout.json、question_locked.json、datasets.json）
 │   └── README.md                # 技能编写说明
 └── README.md
 ```
@@ -408,7 +413,8 @@ GeoAgent/
   `backend/.venv/Scripts/python.exe scripts/build_metric_cards.py` 刷新指标卡；
   改完运行 `scripts/eval_question_matching.py --check`（有 API Key 时再加 `--vector`），
   确认留一别名覆盖率、误执行与独立留出集不退化；向量召回可用 `GEOAGENT_QA_VECTOR=0` 关闭。
-  指标卡与自动推导不一致时 `test_semantic_matching.py` 会失败。
+  校准参数用 `scripts/fit_match_calibration.py` 重新拟合；LLM judge 可用
+  `GEOAGENT_QA_JUDGE=0` 关闭。指标卡与自动推导不一致时 `test_semantic_matching.py` 会失败。
 - **新增 Agent**：继承 `core.agent.Agent`（提供 `name / system_prompt / tools / model`），
   或按需写自定义 `Node`（参考 `agents/router.py`）。system prompt 用中文。
   场景类 Agent（如可达性、承载力）复用共享 SQL 工具层，只追加场景专用工具，
@@ -478,7 +484,7 @@ GeoAgent/
 | --- | --- | --- | --- |
 | `turn_start` | 后端→前端 | `conversation_id` | 一轮对话开始 |
 | `route` | 后端→前端 | `target`, `reason` | 本轮使用的智能体（sql / elder_care / chat，规划扩展 carrying）；会话选择了智能体时 reason 为“会话选择的智能体”，表示未经路由模型判断 |
-| `standard_match` | 后端→前端 | `matched`, `mode`, `decision`, `entry_id`, `score`, `confidence`, `margin`, `risk`, `threshold`, `vector_used`, `vector_entries`, `reasons`, `slots`, `slot_labels`, `candidates`, `candidate_details`, `caliber`, `dataset_id`, `dataset_label`, `table` | 语义预匹配结果（`decision=execute` 才确定性执行；`candidates/clarify` 不查库；`fallback` 转自由 SQL） |
+| `standard_match` | 后端→前端 | `matched`, `mode`, `decision`, `entry_id`, `score`, `confidence`, `p_correct`, `calibrated`, `margin`, `risk`, `threshold`, `p_threshold`, `vector_used`, `vector_entries`, `judge_used`, `judge_entry`, `judge_confidence`, `judge_reason`, `reasons`, `slots`, `slot_labels`, `candidates`, `candidate_details`, `caliber`, `dataset_id`, `dataset_label`, `table` | 语义预匹配结果（`decision=execute` 才确定性执行；`candidates/clarify` 不查库；`fallback` 转自由 SQL；`confidence` 为校准后的 p(correct)） |
 | `token` | 后端→前端 | `delta` | 流式增量文本 |
 | `tool_call` | 后端→前端 | `id`, `name`, `arguments` | 正在调用工具 |
 | `tool_result` | 后端→前端 | `id`, `name`, `is_error`, `content` | 工具结果摘要 |
@@ -524,6 +530,8 @@ GEOAGENT_QA_PREMATCH=execute
 GEOAGENT_QA_PREMATCH_CONFIDENCE=0.42
 # 预匹配是否启用 embedding 向量召回 + RRF（0=纯规则；无 API Key 自动降级）
 GEOAGENT_QA_VECTOR=1
+# 灰度区（candidates/clarify）是否调用 LLM judge 复核候选
+GEOAGENT_QA_JUDGE=1
 ```
 
 ### 4.8 Git 规范

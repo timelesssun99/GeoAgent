@@ -82,6 +82,36 @@ def group_items(data: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
+def _ece(probabilities: list[float], labels: list[int], bins: int = 10) -> float:
+    if not probabilities:
+        return 0.0
+    total = len(probabilities)
+    value = 0.0
+    for index in range(bins):
+        lower, upper = index / bins, (index + 1) / bins
+        selected = [
+            (probability, label)
+            for probability, label in zip(probabilities, labels)
+            if (lower <= probability < upper) or (index == bins - 1 and probability == 1.0)
+        ]
+        if not selected:
+            continue
+        confidence = sum(item[0] for item in selected) / len(selected)
+        accuracy = sum(item[1] for item in selected) / len(selected)
+        value += len(selected) / total * abs(accuracy - confidence)
+    return round(value, 4)
+
+
+def _brier(probabilities: list[float], labels: list[int]) -> float:
+    if not probabilities:
+        return 0.0
+    return round(
+        sum((probability - label) ** 2 for probability, label in zip(probabilities, labels))
+        / len(probabilities),
+        4,
+    )
+
+
 def evaluate(
     items: list[dict[str, Any]],
     library: dict[str, Any],
@@ -95,6 +125,8 @@ def evaluate(
     total = len(items)
     top1 = top3 = auto = false_auto = 0
     vector_used = 0
+    probabilities: list[float] = []
+    labels: list[int] = []
     decisions: dict[str, int] = {}
     latencies: list[float] = []
     errors: list[dict[str, Any]] = []
@@ -133,6 +165,12 @@ def evaluate(
         if is_auto:
             auto += correct
             false_auto += int(not correct)
+        if matcher == "semantic":
+            probability = match.get("p_correct")
+            if probability is None:
+                probability = score
+            probabilities.append(float(probability or 0.0))
+            labels.append(int(correct))
         if not correct:
             errors.append(
                 {
@@ -156,6 +194,8 @@ def evaluate(
         "auto_correct": auto,
         "false_auto": false_auto,
         "vector_used": vector_used,
+        "ece": _ece(probabilities, labels) if matcher == "semantic" else 0.0,
+        "brier": _brier(probabilities, labels) if matcher == "semantic" else 0.0,
         "decisions": decisions,
         "latency_ms": {
             "p50": round(statistics.median(latencies), 2) if latencies else 0,
@@ -301,6 +341,18 @@ def main() -> int:
         by_category[category] = metrics
         print(f"| {category} | {metrics['n']} | {metrics['top1']:.1%} | {metrics['auto']:.1%} | {metrics['false_auto']} |")
     result["by_category"] = by_category
+
+    print("\n## 置信度校准（top-1 p(correct)）\n")
+    print("| 数据集 | ECE | Brier |")
+    print("| --- | --- | --- |")
+    for label in (
+        "57 条 similar/colloquial（留一别名）",
+        "38 条独立留出（留一别名）",
+        "19 条锁定集（留一别名）",
+        "95 条问法（含别名，不代表未见问法）",
+    ):
+        metrics = result["datasets"][label]
+        print(f"| {label} | {metrics.get('ece', 0):.4f} | {metrics.get('brier', 0):.4f} |")
 
     unseen = result["datasets"]["57 条 similar/colloquial（留一别名）"]
     print(

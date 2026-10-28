@@ -109,6 +109,27 @@ RRF_K = 60
 VECTOR_MIN_SIMILARITY = 0.45
 VECTOR_WEIGHT = 0.08
 
+# 置信度校准：离线用脚本拟合 logistic，把匹配分映射成 p(correct)。
+CALIBRATION_FILENAME = "match_calibration.json"
+CALIBRATION_MIN_P = 0.60
+CALIBRATION_FEATURES = (
+    "score",
+    "lexical",
+    "subject",
+    "filter",
+    "side",
+    "agg",
+    "dim",
+    "vector",
+    "rrf",
+    "risk_high",
+    "risk_medium",
+    "is_top1",
+    "margin",
+    "adversarial",
+    "vague",
+)
+
 
 # ---------------------------------------------------------------- 资产定位与加载
 
@@ -142,10 +163,32 @@ def load_metric_cards(path: str) -> dict[str, dict[str, Any]]:
     return cards if isinstance(cards, dict) else {}
 
 
+@lru_cache(maxsize=4)
+def load_calibration(path: str) -> Optional[dict[str, Any]]:
+    """加载置信度校准参数；缺失或结构不合法时返回 None（回退原始匹配分）。"""
+    source = Path(path)
+    if not source.is_file():
+        return None
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    features = data.get("features")
+    weights = data.get("weights")
+    if not isinstance(features, list) or not isinstance(weights, list):
+        return None
+    if len(features) != len(weights):
+        return None
+    return data
+
+
 def clear_semantic_cache() -> None:
-    """清空词表/指标卡缓存（测试或热更新资产后调用）。"""
+    """清空词表/指标卡/校准缓存（测试或热更新资产后调用）。"""
     load_terms.cache_clear()
     load_metric_cards.cache_clear()
+    load_calibration.cache_clear()
 
 
 # ---------------------------------------------------------------- 查询理解
@@ -685,6 +728,74 @@ def _best_risk(profile: EntryProfile) -> str:
     return profile.risk or "low"
 
 
+def calibration_feature_row(
+    candidate: dict[str, Any],
+    query: QuerySlots,
+    margin: float,
+    top_id: str,
+) -> dict[str, float]:
+    """把一条候选压成校准特征（训练脚本与运行时共用）。"""
+    components = (candidate.get("semantic") or {}).get("components") or {}
+    return {
+        "score": float(candidate.get("score") or 0.0),
+        "lexical": float(components.get("lexical") or 0.0),
+        "subject": float(components.get("subject") or 0.0),
+        "filter": float(components.get("filter") or 0.0),
+        "side": float(components.get("side") or 0.0),
+        "agg": float(components.get("agg") or 0.0),
+        "dim": float(components.get("dim") or 0.0),
+        "vector": float(components.get("vector") or 0.0),
+        "rrf": float(components.get("rrf") or 0.0),
+        "risk_high": 1.0 if candidate.get("risk") == "high" else 0.0,
+        "risk_medium": 1.0 if candidate.get("risk") == "medium" else 0.0,
+        "is_top1": 1.0 if str(candidate.get("id")) == str(top_id) else 0.0,
+        "margin": float(margin or 0.0),
+        "adversarial": 1.0 if query.adversarial else 0.0,
+        "vague": 1.0 if query.vague else 0.0,
+    }
+
+
+def _sigmoid(value: float) -> float:
+    if value >= 0:
+        z = math.exp(-value)
+        return 1.0 / (1.0 + z)
+    z = math.exp(value)
+    return z / (1.0 + z)
+
+
+def apply_calibration(
+    scored: list[dict[str, Any]],
+    query: QuerySlots,
+    margin: float,
+    top_id: str,
+    calibration: dict[str, Any],
+) -> bool:
+    """给每条候选计算 p(correct)；返回是否成功应用校准。"""
+    features = calibration.get("features") or []
+    weights = calibration.get("weights") or []
+    means = calibration.get("means") or {}
+    scales = calibration.get("scales") or {}
+    intercept = float(calibration.get("intercept") or 0.0)
+    if not features or len(features) != len(weights):
+        return False
+    if calibration.get("requires_vector"):
+        has_vector = any(float((item.get("semantic") or {}).get("components", {}).get("vector") or 0) > 0 for item in scored)
+        if not has_vector:
+            return False
+    for item in scored:
+        row = calibration_feature_row(item, query, margin, top_id)
+        z = intercept
+        for name, weight in zip(features, weights):
+            mean = float(means.get(name, 0.0))
+            scale = float(scales.get(name, 1.0)) or 1.0
+            z += float(weight) * ((row.get(name, 0.0) - mean) / scale)
+        probability = max(0.0, min(1.0, _sigmoid(z)))
+        item["p_correct"] = round(probability, 4)
+        item["confidence"] = item["p_correct"]
+        item["calibrated"] = True
+    return True
+
+
 def semantic_match(
     question: str,
     library: dict[str, Any],
@@ -778,10 +889,24 @@ def semantic_match(
             )
             vector_applied = True
     scored.sort(key=lambda item: (-item["score"], str(item["id"])))
+    top_id = str(scored[0]["id"]) if scored else ""
+    top_score = scored[0]["score"] if scored else 0.0
+    second_score = scored[1]["score"] if len(scored) > 1 else 0.0
+    margin = round(top_score - second_score, 4) if scored else 0.0
+
+    calibration = load_calibration(str(resolve_asset_path(CALIBRATION_FILENAME, skills_dir)))
+    calibrated = False
+    if calibration and scored:
+        calibrated = apply_calibration(scored, query, margin, top_id, calibration)
+    if not calibrated:
+        for item in scored:
+            item["p_correct"] = item["score"]
+            item["calibrated"] = False
+            item["confidence"] = item["score"]
+
     candidates = scored[:top_k]
     best = candidates[0] if candidates else None
     second = candidates[1] if len(candidates) > 1 else None
-    margin = round(best["score"] - second["score"], 4) if best and second else (best["score"] if best else 0.0)
 
     decision_cfg = terms.get("decision") or {}
     thresholds = decision_cfg.get("score_thresholds") or {}
@@ -800,8 +925,13 @@ def semantic_match(
         elif query.vague and margin < candidate_margin:
             decision = "candidates"
             notice = "问题比较笼统，最接近的标准问题不止一个，请先选择口径。"
-        elif best["score"] >= execute_threshold:
+        elif best["score"] >= execute_threshold and (
+            not calibrated or float(best.get("p_correct") or 0.0) >= CALIBRATION_MIN_P
+        ):
             decision = "execute"
+        elif best["score"] >= execute_threshold:
+            decision = "clarify"
+            notice = "匹配分达到阈值，但校准后的 p(correct) 不足，先确认口径再查库。"
         elif best["score"] >= candidate_floor and margin < candidate_margin:
             decision = "candidates"
             notice = "没有足够把握直接执行，以下是最接近的标准问题。"
@@ -826,10 +956,13 @@ def semantic_match(
         "decision": decision,
         "matched_question_id": best["id"] if best else None,
         "confidence": best["confidence"] if best else None,
+        "p_correct": best.get("p_correct") if best else None,
+        "calibrated": calibrated,
         "score": best["score"] if best else None,
         "margin": margin,
         "risk": risk,
         "execute_threshold": round(execute_threshold, 4),
+        "p_threshold": CALIBRATION_MIN_P if calibrated else None,
         "match_reasons": best["match_reasons"] if best else [],
         "slots": query.to_dict(),
         "slot_labels": {
@@ -859,13 +992,15 @@ async def semantic_match_enriched(
     min_confidence: float = 0.42,
     vector_min_similarity: float = VECTOR_MIN_SIMILARITY,
     vector_weight: float = VECTOR_WEIGHT,
+    llm: Any = None,
+    model: str = "",
+    judge: bool = False,
 ) -> dict[str, Any]:
-    """带向量召回的语义匹配（预匹配主链路使用）。
+    """带向量召回（以及可选 LLM judge）的语义匹配（预匹配主链路使用）。
 
     - 有可用 embedder 时，先算“问题 ↔ 标准问题”的余弦相似度，再与词法排名做 RRF；
     - embedding 不可用/超时/报错时，静默回退到纯规则匹配，不让问答链路失败；
-    - 返回结构与 :func:`semantic_match` 完全一致，额外带 ``vector_attempted`` /
-      ``vector_entries``，便于审计与评估。
+    - ``judge=True`` 时只在 candidates/clarify 灰度区调一次 LLM 复核，execute 不调。
     """
     vector_map: dict[str, float] = {}
     attempted = embedder is not None and bool(getattr(embedder, "available", False))
@@ -893,6 +1028,35 @@ async def semantic_match_enriched(
     )
     result["vector_attempted"] = attempted
     result["vector_entries"] = len(vector_map)
+
+    result["judge_used"] = False
+    result["judge"] = None
+    if (
+        judge
+        and llm is not None
+        and result.get("decision") in {"candidates", "clarify"}
+        and not (result.get("slots") or {}).get("adversarial")
+    ):
+        from .qa_judge import judge_match
+
+        verdict = await judge_match(
+            llm,
+            model or "",
+            question,
+            result.get("candidates") or [],
+            result.get("slot_labels") or {},
+        )
+        if verdict:
+            result["judge_used"] = True
+            result["judge"] = verdict
+            chosen = str(verdict.get("entry_id") or "none")
+            top_id = str(result.get("matched_question_id") or "")
+            if chosen == "none":
+                result["decision"] = "clarify"
+                result["notice"] = "LLM 复核认为候选都不够匹配，先确认口径。"
+            elif chosen != top_id:
+                result["decision"] = "candidates"
+                result["notice"] = "LLM 复核更倾向于另一个候选，请先确认口径。"
     return result
 
 

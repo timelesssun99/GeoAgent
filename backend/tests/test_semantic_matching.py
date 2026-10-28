@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from geoagent.core.llm import AssistantMessage
+from geoagent.qa_judge import judge_match
 from geoagent.qa_semantics import (
     VECTOR_WEIGHT,
     build_profiles,
@@ -201,6 +203,72 @@ async def test_semantic_match_enriched_uses_vector_recall(library):
     assert result["vector_entries"] > 0
     assert result["vector_used"] is True
     assert result["matched_question_id"] == "list_land_types"
+
+
+def test_calibration_returns_probability_only_with_vector(library):
+    with_vector = semantic_match(
+        "把地类的代码和名称列成表",
+        library,
+        min_confidence=PREMATCH_THRESHOLD,
+        vector_scores={"list_land_types": 0.95},
+    )
+    assert with_vector["calibrated"] is True
+    assert with_vector["p_correct"] == with_vector["confidence"]
+    assert 0.0 <= with_vector["p_correct"] <= 1.0
+
+    without_vector = semantic_match(
+        "把地类的代码和名称列成表",
+        library,
+        min_confidence=PREMATCH_THRESHOLD,
+    )
+    assert without_vector["calibrated"] is False
+    assert without_vector["p_correct"] == without_vector["score"]
+
+
+class _FakeJudgeLLM:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.calls = 0
+
+    async def chat(self, model, messages, tools=None, temperature=None, max_tokens=None):
+        self.calls += 1
+        return AssistantMessage(content=self.content)
+
+
+@pytest.mark.asyncio
+async def test_judge_is_used_only_in_gray_zone(library):
+    llm = _FakeJudgeLLM('{"entry_id":"construction_change","confidence":0.8,"reason":"分县新增建设"}')
+    grey = await semantic_match_enriched(
+        "新增建设用地情况怎么样",
+        library,
+        llm=llm,
+        model="fake",
+        judge=True,
+        min_confidence=PREMATCH_THRESHOLD,
+    )
+    assert grey["judge_used"] is True
+    assert grey["judge"]["entry_id"] == "construction_change"
+    assert llm.calls == 1
+
+    confident = await semantic_match_enriched(
+        "全库共有多少个变化图斑、总面积是多少",
+        library,
+        llm=llm,
+        model="fake",
+        judge=True,
+        min_confidence=PREMATCH_THRESHOLD,
+    )
+    assert confident["judge_used"] is False
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_judge_parser_rejects_invalid_or_unknown_entry(library):
+    invalid = _FakeJudgeLLM("不是 JSON")
+    assert await judge_match(invalid, "fake", "问题", [{"id": "total_summary"}]) is None
+
+    unknown = _FakeJudgeLLM('{"entry_id":"not_in_candidates","confidence":0.9}')
+    assert await judge_match(unknown, "fake", "问题", [{"id": "total_summary"}]) is None
 
 
 def test_metric_cards_cover_library_and_stay_in_sync(library, terms):

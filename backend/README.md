@@ -214,7 +214,7 @@ npx @modelcontextprotocol/inspector   # 端点填 /mcp/，请求头带 Authoriza
 | --- | --- | --- | --- |
 | `turn_start` | 服务端→客户端 | `conversation_id` | 一轮对话开始 |
 | `route` | 服务端→客户端 | `target`, `reason` | 本轮使用的智能体（sql / elder_care / chat）；会话已选择智能体时 reason 为“会话选择的智能体”，不再调用路由模型 |
-| `standard_match` | 服务端→客户端 | `matched`, `mode`, `entry_id`, `confidence`, `reasons`, `candidates`, `dataset_id`, `dataset_label`, `table` | 标准问题指标预匹配结果；`matched=false` 表示本轮转自由 SQL 兜底 |
+| `standard_match` | 服务端→客户端 | `matched`, `mode`, `decision`, `entry_id`, `score`, `confidence`, `margin`, `risk`, `threshold`, `vector_used`, `vector_entries`, `reasons`, `slots`, `slot_labels`, `candidates`, `candidate_details`, `caliber`, `dataset_id`, `dataset_label`, `table` | 语义预匹配结果；`decision=execute` 才确定性执行，`candidates/clarify` 不查库，`fallback` 转自由 SQL |
 | `token` | 服务端→客户端 | `delta` | 流式增量文本 |
 | `tool_call` | 服务端→客户端 | `id`, `name`, `arguments` | 正在调用工具 |
 | `tool_result` | 服务端→客户端 | `id`, `name`, `is_error`, `content` | 工具执行结果（摘要文本） |
@@ -376,7 +376,9 @@ GEOAGENT_PG_DSN=postgresql://user:pass@192.168.3.209:5432/zhejiang_agent_project
 GEOAGENT_PG_WHITELIST=data."2026_1_change_landuse",data."2026_2_change_landuse",knowledge_base.dict_tblx,knowledge_base.dict_land_classification_summary
 # datasets.json 中登记的全部期次表会自动并入白名单（显式配置时也会并入）
 GEOAGENT_QA_PREMATCH=execute
-GEOAGENT_QA_PREMATCH_CONFIDENCE=0.5
+GEOAGENT_QA_PREMATCH_CONFIDENCE=0.42
+# 向量召回 + RRF（0=纯规则；无 OPENAI_API_KEY 时自动降级）
+GEOAGENT_QA_VECTOR=1
 ```
 
 准确率评估（手动运行，真实库 + 真实 LLM）：
@@ -417,16 +419,30 @@ backend/.venv/Scripts/python.exe scripts/scrub_conversation_leaks.py --apply  # 
 
 1. **解析期次**：前端传 `dataset_id` → 问题文本里识别（别名 / "2026年第二期" 之类）→ 默认期次；
    问题里提到的期次若未登记，直接说明并停止，不用默认期次顶替；
-2. **指标匹配**：`report/question_library.py` 的可解释规则匹配（标准问法 / 别名 / 关键词 /
-   字符重合度，带"违法""平均""前后时项"等口径否决），低于 `GEOAGENT_QA_PREMATCH_CONFIDENCE`
-   视为未命中；
-3. **确定性执行**：命中且 `execute` 模式时，按条目的 `strategy` 调确定性工具或执行参考 SQL，
-   正文由结果生成，数字与口径不经过模型，并标注标准问题编号、口径与期次；
-4. **自由 SQL 兜底**：未命中、执行失败或 `hint` 模式时，进入 SQLAgent 的 LLM 工具循环，
-   命中信息作为提示注入（`hint`），自由 SQL 引用非当前期次的已登记表会附加提示。
+2. **语义匹配**：`qa_semantics.py` 先做查询理解（主体 / 前后时项 / 聚合 / 维度 / 限定 /
+   转换方向），再召回标准问题并做槽位重排；字面分只作为特征之一。默认再叠加
+   `qa_library.vector_scores_many` 的 embedding 余弦相似度，与词法排名做 RRF（只做有界加分），
+   无 API Key/调用失败时自动回退纯规则。输出
+   `decision=execute|candidates|clarify|fallback`，中/高风险口径（占比、流向、永农、红线）
+   由 `terms.json` 抬高自动执行门槛；
+3. **确定性执行**：`execute` 时按条目的 `strategy` 调确定性工具或执行参考 SQL，
+   正文由结果生成，数字与口径不经过模型，并附口径卡（主体/范围/期次/单位/风险）；
+4. **结果校验**：`qa_verify.py` 校验空结果、负值、比例范围、净变化=流入-流出、
+   按类型分项合计、区县筛选；校验失败会在正文显著标注，不把可疑数字当结论；
+5. **候选/澄清**：`candidates` 给 2~3 个最接近的标准问题让用户选；`clarify` 只问一个
+   关键口径问题（含对抗/编造要求），两者都不查库；
+6. **自由 SQL 兜底**：未命中、执行失败或 `hint` 模式时，进入 SQLAgent 的 LLM 工具循环，
+   并把识别到的槽位与候选条目作为“理解计划”注入提示词，不再是静默降级。
 
-事件上新增 `standard_match`（命中与否、条目、置信度、期次、表名），工具卡片仍沿用
-`tool_call` / `tool_result` / `artifact`，因此前端无需改动即可展示。
+语义层资产（业务可编辑，位于 `skills/qa-library/assets/`）：
+
+- `terms.json`：主体/过滤/聚合/维度/时项/转换方向/风险规则/决策阈值；
+- `metric_cards.json`：42 条标准问题的指标卡（由 `scripts/build_metric_cards.py` 生成）；
+- `question_holdout.json` / `question_locked.json`：独立留出与锁定评估问法。
+
+事件上 `standard_match` 会带出 `decision`、`score`、`margin`、`risk`、`slots`、
+`slot_labels`、`caliber`、`candidate_details`；`message` 事件可带 `caliber` 与
+`verification`。工具卡片仍沿用 `tool_call` / `tool_result` / `artifact`，前端不改也能展示。
 
 ## 土地变化监测快报（land-report）
 

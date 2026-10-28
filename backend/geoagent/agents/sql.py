@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ..core.agent import Agent
+from ..dialogue import followup_hint, remember_query_state, resolve_followup
+from ..number_guard import verify_numbers, warning_text
 from ..prematch import build_period_prompt, resolve_turn_dataset, try_standard_answer
 from ..tools.chart import get_chart_tools
 from ..tools.knowledge import get_knowledge_tools
@@ -134,12 +136,59 @@ class SQLAgent(Agent):
 
     async def exec(self, ctx: Any, payload: Any) -> tuple[str, Any]:
         question = str(payload)
+        ctx.current_question = question
+        ctx.prematch_hint = ""
+        ctx.followup_notice = ""
+        # 0) 多轮追问补全：那第二期呢 / 这个县呢 / 再按类型分。
+        effective_question, followup = resolve_followup(ctx, question)
+        ctx.followup = {**followup, "last_user": question}
+        ctx.effective_question = effective_question
+        ctx.followup_notice = str(followup.get("notice") or "")
         # 1) 期次：本轮所有查询（标准问题与自由 SQL）都基于同一期数据。
-        resolve_turn_dataset(ctx, question)
+        resolve_turn_dataset(ctx, effective_question)
         # 2) 标准问题指标匹配：命中即确定性执行，口径最稳。
-        prematch = await try_standard_answer(ctx, question)
+        prematch = await try_standard_answer(
+            ctx,
+            question,
+            match_text=effective_question,
+            original_question=question,
+        )
         if prematch is not None:
             return "default", prematch
-        # 3) 未命中：把当期期次与命中口径写进提示词，交给自由 SQL 工具循环兜底。
+        # 3) 未命中：把当期期次、追问补全与命中口径写进提示词，交给自由 SQL 工具循环兜底。
         self.system_prompt = self.BASE_SYSTEM_PROMPT + build_period_prompt(ctx)
-        return await super().exec(ctx, payload)
+        hint = followup_hint(ctx)
+        if hint:
+            ctx.prematch_hint = "\n\n".join(
+                block for block in (ctx.prematch_hint, hint) if block
+            )
+            self.system_prompt = self.BASE_SYSTEM_PROMPT + build_period_prompt(ctx)
+        ctx._turn_start_index = len(ctx.session.history())
+        result = await super().exec(ctx, payload)
+        remember_query_state(ctx, question, effective_question)
+        return result
+
+    async def finalize_answer(self, ctx: Any, final: Any) -> Any:
+        """自由 SQL 回答出口：做一次“正文数字 ↔ 本轮工具结果”的溯源。"""
+        start = int(getattr(ctx, "_turn_start_index", 0) or 0)
+        messages = list(getattr(ctx, "turn_tool_messages", None) or [])
+        if not messages:
+            messages = ctx.session.history()[start:]
+        result = verify_numbers(
+            final.content or "",
+            messages,
+            question=str(getattr(ctx, "current_question", "") or ""),
+        )
+        remember_query_state(
+            ctx,
+            str(getattr(ctx, "current_question", "") or ""),
+            str(getattr(ctx, "effective_question", "") or ""),
+        )
+        ctx.answer_metadata = {
+            "number_guard": result,
+            "query_state": dict(ctx.query_state),
+        }
+        warning = warning_text(result)
+        if warning:
+            final.content = (final.content or "").rstrip() + "\n\n" + warning
+        return final

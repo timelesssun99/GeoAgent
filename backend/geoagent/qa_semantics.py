@@ -112,6 +112,7 @@ VECTOR_WEIGHT = 0.08
 # 置信度校准：离线用脚本拟合 logistic，把匹配分映射成 p(correct)。
 CALIBRATION_FILENAME = "match_calibration.json"
 CALIBRATION_MIN_P = 0.60
+UNSUPPORTED_AGGS = {"average", "median"}
 CALIBRATION_FEATURES = (
     "score",
     "lexical",
@@ -222,6 +223,7 @@ class QuerySlots:
     risk: str = "low"
     adversarial: bool = False
     vague: bool = False
+    unsupported: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -236,6 +238,7 @@ class QuerySlots:
             "risk": self.risk,
             "adversarial": self.adversarial,
             "vague": self.vague,
+            "unsupported": self.unsupported,
         }
 
 
@@ -330,10 +333,17 @@ def understand(question: str, terms: Optional[dict[str, Any]] = None) -> QuerySl
     threshold_match = re.search(r"小于\s*(\d+(?:\.\d+)?)", text)
     if threshold_match:
         slots.threshold = float(threshold_match.group(1))
+    # 标准问题库只有“小于 X”的细碎图斑口径；大于/超过类阈值交自由 SQL。
+    if re.search(r"(超过|大于|高于|不少于|至少|以上)\s*\d", text):
+        slots.unsupported = True
 
     slots.adversarial = bool(_hits(text, list(terms.get("negation") or [])))
     if re.search(r"按[^，。；]{0,20}(?:等于|=|算成|当成)", text):
         slots.adversarial = True
+    slots.unsupported = slots.unsupported or any(
+        word in text
+        for word in ("方差", "标准差", "四分位", "分位数", "中位数", "平均值", "均值", "众数", "相关系数")
+    )
     slots.vague = bool(_hits(text, list(terms.get("vague") or []))) and not (
         slots.aggs & {"ratio", "flow", "max", "top", "list"}
     )
@@ -831,6 +841,8 @@ def semantic_match(
         compatible = not (
             (query.filters and not (query.filters & profile.filters))
             or (query.transition and profile.transition and query.transition != profile.transition)
+            or ((query.aggs & UNSUPPORTED_AGGS) and not (profile.aggs & query.aggs))
+            or query.unsupported
         )
         scored.append(
             {

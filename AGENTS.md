@@ -134,6 +134,12 @@ GeoAgent 是一个**通过自然语言对话完成地理空间分析与业务问
   自动降级为纯规则。评估脚本 `scripts/eval_question_matching.py`
   （`--vector` 对比向量效果），校准训练 `scripts/fit_match_calibration.py`，
   指标卡生成 `scripts/build_metric_cards.py`。
+  **自由 SQL 数字溯源**（`number_guard.py`）：正文数字对照本轮工具 content/artifact，
+  允许平方米↔亩、派生百分比和用户参数；未溯源数字在正文末尾警示，并在 `message`
+  事件带 `number_guard` 元数据。**多轮追问**（`dialogue.py`）：`那第二期呢`、
+  `这个县呢`、`再按类型分`、`那林地呢` 继承上一轮完整问题；`query_state` 随最终
+  消息持久化，跨 REST/WS 恢复。中位数/方差/“超过 X”等标准库不支持的统计量不会
+  被相近条目误执行。
 - **套合入库（前后时相切分 → 一期套合表）**（`overlay/` + `server/overlay_routes.py` +
   前端对话窗口上方的「套合入库」按钮，大弹窗承载、不跳页；`/?view=overlay` 仍可直接访问）：上传后时相（变化监测图斑）、前时相（变更地类图斑）与可选的
   永久基本农田、生态保护红线，在 PostGIS 内按后时相边界切分前时相碎片、挂接母斑属性、
@@ -218,9 +224,10 @@ GeoAgent 是一个**通过自然语言对话完成地理空间分析与业务问
 
 - **服务层**（`server/`）：REST（会话 CRUD、模型切换、发消息）+ WebSocket 流式事件
   （token / route / tool_call / tool_result / artifact / message / error / turn_end）。
-- **验证**：330 个 pytest 用例；7 个 golden 用例在
-  qwen3.7-max-2026-06-08 下真实跑通（7/7）。本机环境下 4 个 Word/模板相关用例因临时目录
-  `os.replace` 报拒绝访问而失败，改动前的干净副本同样失败（环境问题，与代码无关）。
+- **验证**：341 个 pytest 用例；7 个 golden 用例在
+  qwen3.7-max-2026-06-08 下真实跑通（7/7）。本机环境下 4~5 个 Word/模板/区县图表相关
+  用例因临时目录 `os.replace` 拒绝访问或陈旧 mock 失败（`test_manual_binding` 偶发），
+  改动前的干净副本同样失败（环境问题，与代码无关）。
 - **前端骨架**（`frontend/`）：左侧历史会话列表 + 右侧会话窗口；流式展示
   token / 路由 / 工具调用卡片（运行中/完成/失败）；GeoJSON 用 OpenLayers
   内嵌小地图渲染、表格用 HTML 表格渲染；会话级模型切换下拉框；Vite 代理
@@ -270,6 +277,8 @@ GeoAgent/
 │       ├── datasets.py          # 期次数据集注册表（一张套合表 = 一期数据）
 │       ├── qa_semantics.py      # 语义槽位匹配 + 向量 RRF + p(correct) 校准
 │       ├── qa_judge.py          # 灰度区 LLM judge 复核候选
+│       ├── number_guard.py      # 自由 SQL 正文数字 ↔ 工具结果溯源
+│       ├── dialogue.py          # 多轮追问补全与 QueryState
 │       ├── qa_verify.py         # 确定性结果校验（比例/合计/净变化/区县）
 │       ├── stateless.py         # 无状态问答执行（MCP 用：不落会话，只记审计）
 │       ├── mcp_http.py          # MCP 对外接口（Streamable HTTP：ask / 快报 / 期次）
@@ -484,14 +493,14 @@ GeoAgent/
 | --- | --- | --- | --- |
 | `turn_start` | 后端→前端 | `conversation_id` | 一轮对话开始 |
 | `route` | 后端→前端 | `target`, `reason` | 本轮使用的智能体（sql / elder_care / chat，规划扩展 carrying）；会话选择了智能体时 reason 为“会话选择的智能体”，表示未经路由模型判断 |
-| `standard_match` | 后端→前端 | `matched`, `mode`, `decision`, `entry_id`, `score`, `confidence`, `p_correct`, `calibrated`, `margin`, `risk`, `threshold`, `p_threshold`, `vector_used`, `vector_entries`, `judge_used`, `judge_entry`, `judge_confidence`, `judge_reason`, `reasons`, `slots`, `slot_labels`, `candidates`, `candidate_details`, `caliber`, `dataset_id`, `dataset_label`, `table` | 语义预匹配结果（`decision=execute` 才确定性执行；`candidates/clarify` 不查库；`fallback` 转自由 SQL；`confidence` 为校准后的 p(correct)） |
+| `standard_match` | 后端→前端 | `matched`, `mode`, `decision`, `entry_id`, `score`, `confidence`, `p_correct`, `calibrated`, `margin`, `risk`, `threshold`, `p_threshold`, `vector_used`, `vector_entries`, `judge_used`, `judge_entry`, `judge_confidence`, `judge_reason`, `resolved_question`, `reasons`, `slots`, `slot_labels`, `candidates`, `candidate_details`, `caliber`, `dataset_id`, `dataset_label`, `table` | 语义预匹配结果（`decision=execute` 才确定性执行；`candidates/clarify` 不查库；`fallback` 转自由 SQL；`confidence` 为校准后的 p(correct)；`resolved_question` 为多轮补全后的问题） |
 | `token` | 后端→前端 | `delta` | 流式增量文本 |
 | `tool_call` | 后端→前端 | `id`, `name`, `arguments` | 正在调用工具 |
 | `tool_result` | 后端→前端 | `id`, `name`, `is_error`, `content` | 工具结果摘要 |
 | `artifact` | 后端→前端 | `kind`, `name`, `data` | 可视化产物（geojson / table / chart / file 等）；geojson 可带 `data.style`（预警图斑为红色描边 + 半透明红填充）与 `data.linked_table`（`{columns, rows, feature_key, row_key}`，前端据此实现表格行 ↔ 图斑的定位高亮联动） |
 | `subagent_start` | 后端→前端 | `id`, `prompt` | 子 Agent 开始运行（task） |
 | `subagent_end` | 后端→前端 | `id`, `is_error`, `content` | 子 Agent 结束并返回最终文本 |
-| `message` | 后端→前端 | `role`, `content`, `model` | 最终助手消息 |
+| `message` | 后端→前端 | `role`, `content`, `model`, `number_guard`, `query_state` | 最终助手消息；`number_guard` 为自由 SQL 数字溯源结果，`query_state` 为供下一轮追问继承的轻量状态 |
 | `error` | 后端→前端 | `message` | 错误信息 |
 | `turn_end` | 后端→前端 | `conversation_id` | 一轮对话结束 |
 | `user` | 前端→后端 | `content`, `agent`, `dataset_id`, `workflow_id`, `question_id`, `source` | 用户消息；`agent` 为会话旁“智能体”选择框选中的智能体（不传则走 RouterNode 兜底），`dataset_id` 为输入框上方“数据表”选择框选中的期次（不传则按问题文本识别） |

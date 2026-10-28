@@ -36,9 +36,13 @@ description: 标准问题库匹配与问数执行依据；先做语义槽位理�
    p(correct) < 0.60 时不自动执行。
 4. 候选/澄清灰度区可选调用一次 LLM judge 复核 Top-3（`GEOAGENT_QA_JUDGE=1`）；
    judge 只维持候选/澄清，不直接执行。
-5. 每条确定性回答带口径卡（主体/范围/期次/单位/风险）与结果校验结论；校验失败要显著标注，
+5. 自由 SQL 的正文数字由 `number_guard.py` 对照本轮工具结果；未溯源数字会在正文末尾
+   标注，不能把模型心算/编造的数字当结论。
+6. 多轮追问（`那第二期呢`、`这个县呢`、`再按类型分`、`那林地呢`）由 `dialogue.py`
+   继承上一轮问题；`query_state` 随最终消息持久化，不依赖进程内存。
+7. 每条确定性回答带口径卡（主体/范围/期次/单位/风险）与结果校验结论；校验失败要显著标注，
    不能把可疑数字当结论。
-6. 调整词表或标准条目后运行 `scripts/build_metric_cards.py` 刷新指标卡、运行
+8. 调整词表或标准条目后运行 `scripts/build_metric_cards.py` 刷新指标卡、运行
    `scripts/fit_match_calibration.py` 重新校准，再运行 `scripts/eval_question_matching.py --check`
    （有 API Key 时加 `--vector`）确认未见问法覆盖率、ECE 与误执行不退化。
 

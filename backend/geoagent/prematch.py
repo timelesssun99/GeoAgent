@@ -484,6 +484,7 @@ def _audit_match(
             "ts": datetime.now(timezone.utc).isoformat(),
             "conversation_id": str(getattr(ctx, "conversation_id", "") or ""),
             "question": str(question or "")[:500],
+            "resolved_question": str(match.get("resolved_question") or "")[:500],
             "dataset_id": str(getattr(getattr(ctx, "dataset", None), "id", "") or ""),
             "decision": match.get("decision"),
             "entry_id": match.get("matched_question_id"),
@@ -609,20 +610,29 @@ async def _respond_text(
     return final
 
 
-async def try_standard_answer(ctx: Any, question: str) -> Optional[AssistantMessage]:
+async def try_standard_answer(
+    ctx: Any,
+    question: str,
+    *,
+    match_text: Optional[str] = None,
+    original_question: Optional[str] = None,
+) -> Optional[AssistantMessage]:
     """按“理解 → 决策 → 执行 → 校验”处理一轮问题。
 
-    - ``execute``：语义匹配足够可靠，按标准条目确定性执行；
-    - ``candidates`` / ``clarify``：不查库，给出候选或定向澄清；
-    - ``fallback``：交自由 SQL，但把识别到的槽位与候选写进提示词，不再是静默降级。
+    ``question`` 是用户原话（用于会话/审计）；``match_text`` 是追问补全后的问题
+    （用于期次与标准问题匹配，缺省等于原话）。
     """
+    display_question = str(original_question or question)
+    match_question = str(match_text or question)
     settings = getattr(ctx, "settings", None)
     mode = str(getattr(settings, "qa_prematch", "execute") or "execute").strip().lower()
     if mode not in {"execute", "hint"}:
         return None
+    if getattr(ctx, "followup_notice", ""):
+        return await _respond_text(ctx, display_question, str(ctx.followup_notice))
     if getattr(ctx, "period_notice", ""):
-        return await _respond_text(ctx, question, str(ctx.period_notice))
-    if _is_report_intent(question):
+        return await _respond_text(ctx, display_question, str(ctx.period_notice))
+    if _is_report_intent(match_question):
         return None
     try:
         library = _load_library(str(resolve_library_asset(_skills_dir(ctx))))
@@ -634,7 +644,7 @@ async def try_standard_answer(ctx: Any, question: str) -> Optional[AssistantMess
     try:
         embedder = getattr(ctx, "embeddings", None) if getattr(settings, "qa_vector", True) else None
         match = await semantic_match_enriched(
-            str(question),
+            match_question,
             library,
             min_confidence=threshold,
             skills_dir=_skills_dir(ctx),
@@ -645,6 +655,7 @@ async def try_standard_answer(ctx: Any, question: str) -> Optional[AssistantMess
         )
     except (OSError, ValueError, json.JSONDecodeError):
         return None
+    match["resolved_question"] = match_question
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     period = getattr(ctx, "dataset", None)
     candidates = match.get("candidates") or []
@@ -688,6 +699,7 @@ async def try_standard_answer(ctx: Any, question: str) -> Optional[AssistantMess
         "dataset_id": getattr(period, "id", "") or "",
         "dataset_label": getattr(period, "label", "") or "",
         "table": getattr(period, "table", "") or "",
+        "resolved_question": match_question if match_question != display_question else "",
     }
 
     if mode == "hint":
@@ -720,7 +732,7 @@ async def try_standard_answer(ctx: Any, question: str) -> Optional[AssistantMess
         _audit_match(ctx, question, match, elapsed_ms=elapsed_ms)
         return await _respond_text(
             ctx,
-            question,
+            display_question,
             content,
             metadata={
                 "match_decision": decision,
@@ -737,7 +749,7 @@ async def try_standard_answer(ctx: Any, question: str) -> Optional[AssistantMess
 
     # 问题里限定了具体区县时：能作为工具参数下钻就下钻，否则不套用整表口径
     arguments, blocked = await _scoped_arguments(
-        ctx, entry, str(question), str(getattr(period, "table", "") or "")
+        ctx, entry, match_question, str(getattr(period, "table", "") or "")
     )
     if blocked:
         await ctx.emit(
@@ -781,7 +793,7 @@ async def try_standard_answer(ctx: Any, question: str) -> Optional[AssistantMess
 
     county = str((arguments or {}).get("county") or "")
     verification = verify_matched_result(entry, executed.result, county=county)
-    ctx.session.add_user(str(question))
+    ctx.session.add_user(display_question)
     ctx.session.add_message(
         {
             "role": "assistant",
@@ -802,10 +814,21 @@ async def try_standard_answer(ctx: Any, question: str) -> Optional[AssistantMess
     )
     ctx.session.add_message(executed.result.to_message())
     await _emit_tool_events(ctx, executed)
+    from .dialogue import remember_query_state
+
+    remember_query_state(
+        ctx,
+        display_question,
+        match_question,
+        entry_id=str(entry.get("id") or ""),
+        county=county,
+        unit=str(entry.get("unit") or ""),
+    )
     metadata = {
         "match_decision": "execute",
         "caliber": caliber,
         "verification": verification,
+        "query_state": dict(ctx.query_state),
     }
     final = _final_message(
         ctx,

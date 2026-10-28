@@ -214,14 +214,14 @@ npx @modelcontextprotocol/inspector   # 端点填 /mcp/，请求头带 Authoriza
 | --- | --- | --- | --- |
 | `turn_start` | 服务端→客户端 | `conversation_id` | 一轮对话开始 |
 | `route` | 服务端→客户端 | `target`, `reason` | 本轮使用的智能体（sql / elder_care / chat）；会话已选择智能体时 reason 为“会话选择的智能体”，不再调用路由模型 |
-| `standard_match` | 服务端→客户端 | `matched`, `mode`, `decision`, `entry_id`, `score`, `confidence`, `p_correct`, `calibrated`, `margin`, `risk`, `threshold`, `p_threshold`, `vector_used`, `vector_entries`, `judge_used`, `judge_entry`, `judge_confidence`, `judge_reason`, `reasons`, `slots`, `slot_labels`, `candidates`, `candidate_details`, `caliber`, `dataset_id`, `dataset_label`, `table` | 语义预匹配结果；`decision=execute` 才确定性执行，`candidates/clarify` 不查库，`fallback` 转自由 SQL；`confidence` 为校准后的 p(correct) |
+| `standard_match` | 服务端→客户端 | `matched`, `mode`, `decision`, `entry_id`, `score`, `confidence`, `p_correct`, `calibrated`, `margin`, `risk`, `threshold`, `p_threshold`, `vector_used`, `vector_entries`, `judge_used`, `judge_entry`, `judge_confidence`, `judge_reason`, `resolved_question`, `reasons`, `slots`, `slot_labels`, `candidates`, `candidate_details`, `caliber`, `dataset_id`, `dataset_label`, `table` | 语义预匹配结果；`decision=execute` 才确定性执行，`candidates/clarify` 不查库，`fallback` 转自由 SQL；`confidence` 为校准后的 p(correct)；`resolved_question` 为多轮补全后的问题 |
 | `token` | 服务端→客户端 | `delta` | 流式增量文本 |
 | `tool_call` | 服务端→客户端 | `id`, `name`, `arguments` | 正在调用工具 |
 | `tool_result` | 服务端→客户端 | `id`, `name`, `is_error`, `content` | 工具执行结果（摘要文本） |
 | `artifact` | 服务端→客户端 | `kind`, `name`, `data` | 可视化产物（geojson / table / chart / file 等）；geojson 可带 `data.style`，预警图斑为红色描边 + 半透明红填充 |
 | `subagent_start` | 服务端→客户端 | `id`, `prompt` | 子 Agent 开始运行（task） |
 | `subagent_end` | 服务端→客户端 | `id`, `is_error`, `content` | 子 Agent 结束并返回最终文本 |
-| `message` | 服务端→客户端 | `role`, `content`, `model` | 最终助手消息 |
+| `message` | 服务端→客户端 | `role`, `content`, `model`, `number_guard`, `query_state` | 最终助手消息；`number_guard` 为自由 SQL 数字溯源，`query_state` 供下一轮追问继承 |
 | `error` | 服务端→客户端 | `message` | 错误信息 |
 | `turn_end` | 服务端→客户端 | `conversation_id` | 一轮对话结束 |
 | `user` | 客户端→服务端 | `content`, `agent`, `dataset_id` | 用户发送消息；`agent` 指定本轮智能体（不传走 RouterNode 兜底），`dataset_id` 指定期次表 |
@@ -436,7 +436,12 @@ backend/.venv/Scripts/python.exe scripts/scrub_conversation_leaks.py --apply  # 
    关键口径问题（含对抗/编造要求），两者都不查库；灰度区可再调用一次 LLM judge 复核
    Top-3（`GEOAGENT_QA_JUDGE=1`），judge 不直接执行，只维持候选/澄清；
 6. **自由 SQL 兜底**：未命中、执行失败或 `hint` 模式时，进入 SQLAgent 的 LLM 工具循环，
-   并把识别到的槽位与候选条目作为“理解计划”注入提示词，不再是静默降级。
+   并把识别到的槽位与候选条目作为“理解计划”注入提示词，不再是静默降级；
+7. **自由 SQL 数字溯源**：`number_guard.py` 把最终正文中的数字与本轮 `tool` 消息的
+   `content`/`artifact` 对照，允许平方米↔亩、派生百分比和用户参数；对不上的数字在
+   正文末尾追加“数字溯源”警示，并在 `message` 事件带 `number_guard` 元数据；
+8. **多轮追问**：`dialogue.py` 在预匹配前补全 `那第二期呢`、`这个县呢`、`再按类型分`、
+   `那林地呢`；`query_state` 随最终消息持久化，换 REST/WS 连接后仍能继承上一轮问题。
 
 语义层资产（业务可编辑，位于 `skills/qa-library/assets/`）：
 
@@ -445,9 +450,10 @@ backend/.venv/Scripts/python.exe scripts/scrub_conversation_leaks.py --apply  # 
 - `match_calibration.json`：top-1 p(correct) 校准参数（由 `scripts/fit_match_calibration.py` 拟合）；
 - `question_holdout.json` / `question_locked.json`：独立留出与锁定评估问法。
 
-事件上 `standard_match` 会带出 `decision`、`score`、`margin`、`risk`、`slots`、
-`slot_labels`、`caliber`、`candidate_details`；`message` 事件可带 `caliber` 与
-`verification`。工具卡片仍沿用 `tool_call` / `tool_result` / `artifact`，前端不改也能展示。
+事件上 `standard_match` 会带出 `decision`、`score`、`p_correct`、`calibrated`、`margin`、
+`risk`、`slots`、`slot_labels`、`caliber`、`candidate_details`、`resolved_question`；
+`message` 事件可带 `caliber`、`verification`、`number_guard`、`query_state`。工具卡片仍沿用
+`tool_call` / `tool_result` / `artifact`，前端不改也能展示。
 
 ## 土地变化监测快报（land-report）
 

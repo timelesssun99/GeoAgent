@@ -271,6 +271,24 @@ async def test_judge_parser_rejects_invalid_or_unknown_entry(library):
     assert await judge_match(unknown, "fake", "问题", [{"id": "total_summary"}]) is None
 
 
+def test_unsupported_aggregation_does_not_execute_standard_question(library):
+    """中位数/平均值不在标准问题里，不能被别的条目静默顶上执行。"""
+    match = semantic_match(
+        "第二期图斑面积的中位数是多少",
+        library,
+        min_confidence=PREMATCH_THRESHOLD,
+    )
+    assert match["decision"] != "execute", match
+    assert match["slots"]["unsupported"] is True
+
+    greater = semantic_match(
+        "第二期图斑面积超过1000亩的有几个",
+        library,
+        min_confidence=PREMATCH_THRESHOLD,
+    )
+    assert greater["decision"] != "execute", greater
+
+
 def test_metric_cards_cover_library_and_stay_in_sync(library, terms):
     cards = load_metric_cards(str(ASSETS / "metric_cards.json"))
     ids = {str(entry["id"]) for entry in library["entries"]}

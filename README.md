@@ -45,10 +45,16 @@ npm run dev          # http://localhost:5173
 
 ## 验证与回归
 
-- 后端：`cd backend && uv run pytest`（当前 89 个用例全绿）。
+- 后端：`cd backend && uv run pytest`（当前 352 个用例，347 passed / 5 个已知本机环境失败）。
 - 准确率回归（真实库 + 真实 LLM，手动）：`uv run --env-file .env python ../scripts/eval_sql_agent.py`
   （7 个 golden 用例，qwen3.7-max 下 7/7）。
 - 数据库冒烟：`uv run --env-file .env python ../scripts/smoke_pg.py`。
+
+## 文档
+
+- [开发报告（面向项目组/原作者）](docs/开发报告-智能问数优化.md)
+- [语义匹配与准确性优化落地说明](docs/智能问数语义匹配优化落地说明.md)
+- [MCP 对接说明](docs/MCP对接说明.md)
 
 ## 目录
 

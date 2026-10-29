@@ -141,6 +141,11 @@ def build_period_prompt(ctx: Any) -> str:
         "- SQL 里引用非当前期次的已登记表时，先在回答中说明原因；"
         "不得把其它期次的结果并进当前期次的合计。"
     )
+    from .tools.field_dictionaries import prompt_summary
+
+    field_summary = prompt_summary()
+    if field_summary:
+        lines.append(f"- 字段字典（展示辅助，不替代编码判断）：{field_summary}。")
     hint = str(getattr(ctx, "prematch_hint", "") or "")
     if hint:
         lines.append("")
@@ -485,6 +490,7 @@ def _audit_match(
             "question": str(question or "")[:500],
             "resolved_question": str(match.get("resolved_question") or "")[:500],
             "dataset_id": str(getattr(getattr(ctx, "dataset", None), "id", "") or ""),
+            "data_version": str(getattr(getattr(ctx, "dataset", None), "version", "") or ""),
             "decision": match.get("decision"),
             "entry_id": match.get("matched_question_id"),
             "score": match.get("score"),
@@ -698,6 +704,7 @@ async def try_standard_answer(
         "dataset_id": getattr(period, "id", "") or "",
         "dataset_label": getattr(period, "label", "") or "",
         "table": getattr(period, "table", "") or "",
+        "data_version": getattr(period, "version", "") or "",
         "resolved_question": match_question if match_question != display_question else "",
     }
 

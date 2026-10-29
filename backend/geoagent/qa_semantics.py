@@ -1095,6 +1095,7 @@ def caliber_card(
         "period_id": getattr(period, "id", "") or "",
         "period": getattr(period, "label", "") or "",
         "table": getattr(period, "table", "") or "",
+        "data_version": getattr(period, "version", "") or "",
         "unit": str(entry.get("unit") or "亩"),
         "scope": str(arguments.get("county") or "全库"),
     }

@@ -72,6 +72,7 @@ Microsoft Word（Windows）或 LibreOffice 时同步生成 PDF；可用
 | GET | `/api/conversations/{id}/messages` | 历史消息（含 artifacts） |
 | PUT | `/api/conversations/{id}/model` | 切换该会话的模型 |
 | POST | `/api/conversations/{id}/messages` | 发消息（非流式，返回最终回复） |
+| POST | `/api/conversations/{id}/feedback` | 回答反馈（`rating=up/down`、`reason`、`message_id`），落库并追加审计 |
 | WS | `/api/conversations/{id}/ws` | 流式对话：token / tool_call / tool_result / artifact / message 事件 |
 
 会话列表按创建时间倒序返回（最新在前）。新建会话默认为"新会话"标题，
@@ -214,7 +215,7 @@ npx @modelcontextprotocol/inspector   # 端点填 /mcp/，请求头带 Authoriza
 | --- | --- | --- | --- |
 | `turn_start` | 服务端→客户端 | `conversation_id` | 一轮对话开始 |
 | `route` | 服务端→客户端 | `target`, `reason` | 本轮使用的智能体（sql / elder_care / chat）；会话已选择智能体时 reason 为“会话选择的智能体”，不再调用路由模型 |
-| `standard_match` | 服务端→客户端 | `matched`, `mode`, `decision`, `entry_id`, `score`, `confidence`, `p_correct`, `calibrated`, `margin`, `risk`, `threshold`, `p_threshold`, `vector_used`, `vector_entries`, `judge_used`, `judge_entry`, `judge_confidence`, `judge_reason`, `resolved_question`, `reasons`, `slots`, `slot_labels`, `candidates`, `candidate_details`, `caliber`, `dataset_id`, `dataset_label`, `table` | 语义预匹配结果；`decision=execute` 才确定性执行，`candidates/clarify` 不查库，`fallback` 转自由 SQL；`confidence` 为校准后的 p(correct)；`resolved_question` 为多轮补全后的问题 |
+| `standard_match` | 服务端→客户端 | `matched`, `mode`, `decision`, `entry_id`, `score`, `confidence`, `p_correct`, `calibrated`, `margin`, `risk`, `threshold`, `p_threshold`, `vector_used`, `vector_entries`, `judge_used`, `judge_entry`, `judge_confidence`, `judge_reason`, `resolved_question`, `data_version`, `reasons`, `slots`, `slot_labels`, `candidates`, `candidate_details`, `caliber`, `dataset_id`, `dataset_label`, `table` | 语义预匹配结果；`decision=execute` 才确定性执行，`candidates/clarify` 不查库，`fallback` 转自由 SQL；`confidence` 为校准后的 p(correct)；`resolved_question` 为多轮补全后的问题 |
 | `token` | 服务端→客户端 | `delta` | 流式增量文本 |
 | `tool_call` | 服务端→客户端 | `id`, `name`, `arguments` | 正在调用工具 |
 | `tool_result` | 服务端→客户端 | `id`, `name`, `is_error`, `content` | 工具执行结果（摘要文本） |
@@ -343,7 +344,8 @@ SQL 中需按 `describe_table` 返回的原文加双引号，否则 PostgreSQL �
 - 图斑类型（变化后） = `"TBLX"`（影像地类体系，33 类；数据中 1-4 前导零为 01-04）
 - 面积 `"MJ"` 库内单位为平方米；对用户展示统一换算为亩（1 平方米 = 0.0015 亩，见 `tools/units.py`）
 - 无修饰的"地类/耕地/建设用地"默认按原土地类型统计；"图斑类型/变化后"按 `TBLX`
-- TBLX→三大类：默认模糊映射模板（`skills/land-report/assets/tblx_categories.json`），
+- TBLX→三大类：字典驱动映射（`skills/land-report/assets/tblx_categories.json`），
+  清单以 `knowledge_base.dict_tblx` 为正式来源，6 个边界类型标记 pending_business；
   用户提供正式规则后替换
 
 展示映射：`run_sql` 返回表格的表头与 `TBLX` 值自动映射为中文、面积列换算为亩
@@ -439,8 +441,9 @@ backend/.venv/Scripts/python.exe scripts/scrub_conversation_leaks.py --apply  # 
 6. **自由 SQL 兜底**：未命中、执行失败或 `hint` 模式时，进入 SQLAgent 的 LLM 工具循环，
    并把识别到的槽位与候选条目作为“理解计划”注入提示词，不再是静默降级；
 7. **自由 SQL 数字溯源**：`number_guard.py` 把最终正文中的数字与本轮 `tool` 消息的
-   `content`/`artifact` 对照，允许平方米↔亩、派生百分比和用户参数；对不上的数字在
-   正文末尾追加“数字溯源”警示，并在 `message` 事件带 `number_guard` 元数据；
+   `content`/`artifact` 逐条对照；可机械修正的单位错误直接修正，不能修正的用证据重写一次，
+   仍失败则阻断正文只保留表格；`message` 事件带 `number_guard` 的
+   `corrections/rewrite_attempted/blocked`；
 8. **多轮追问**：`dialogue.py` 在预匹配前补全 `那第二期呢`、`这个县呢`、`再按类型分`、
    `那林地呢`；`query_state` 随最终消息持久化，换 REST/WS 连接后仍能继承上一轮问题。
 
@@ -449,6 +452,8 @@ backend/.venv/Scripts/python.exe scripts/scrub_conversation_leaks.py --apply  # 
 - `terms.json`：主体/过滤/聚合/维度/时项/转换方向/风险规则/决策阈值；
 - `metric_cards.json`：42 条标准问题的指标卡（由 `scripts/build_metric_cards.py` 生成）；
 - `match_calibration.json`：top-1 p(correct) 校准参数（由 `scripts/fit_match_calibration.py` 拟合）；
+- `field_dictionaries.json`：TZ / QSX / CZCSXM 业务字典（未确认值保留原码）；
+- `data_versions.json`：数据/口径/映射版本与变更记录；
 - `question_holdout.json` / `question_locked.json`：独立留出与锁定评估问法。
 
 事件上 `standard_match` 会带出 `decision`、`score`、`p_correct`、`calibrated`、`margin`、
@@ -469,7 +474,8 @@ backend/.venv/Scripts/python.exe scripts/scrub_conversation_leaks.py --apply  # 
 `frontend/src/toolLabels.js`），工具描述、技能说明与 SQLAgent/路由提示词均为中文。
 
 - 口径与 SQLAgent 知识卡一致：原土地类型 = DLBM/DLMC，图斑类型 = TBLX；
-  TBLX→三大类使用临时映射 `geoagent/tools/categories.py`（正式映射下发后替换）
+  TBLX→三大类使用 `geoagent/tools/categories.py` 加载字典资产（清单以 dict_tblx 为准，
+  边界项待业务确认）；
 - 面积库内为平方米、展示统一按亩换算（`tools/units.py`）
 - 统计期次跟随会话上方“数据表”选择框（`tools/report.py` 用 `context_table(ctx)` 取表），
   标题监测期行、正文与输出文件名都标注所选期次

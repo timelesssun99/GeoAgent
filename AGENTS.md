@@ -87,7 +87,8 @@ GeoAgent 是一个**通过自然语言对话完成地理空间分析与业务问
   `farmland_flow_summary` / `construction_change_summary` / `top_conversions`，
   后端预写 SQL 固化 join、口径与合计，模型只调用并依据结果给出结论式回答，
   提升统计稳定性；
-  前后时项比较统一在三大类层面（前时项走三调三级映射，后时项走 TBLX 模糊映射）。
+  前后时项比较统一在三大类层面（前时项走三调三级映射；后时项 TBLX 清单以
+  `knowledge_base.dict_tblx` 为正式来源，分类边界项标记 pending_business）。
 - **预警分析（图斑上图）**（`tools/warning.py` + 前端 `ArtifactView.vue`）：
   `warning_yongnong_polygons` / `warning_redline_polygons` 按“建设用地（含疑似，19 类）”口径
   筛出涉及永久基本农田(`SFYN=是`)/生态保护红线(`SFHX=是`)的图斑，一次返回数量面积、
@@ -134,12 +135,13 @@ GeoAgent 是一个**通过自然语言对话完成地理空间分析与业务问
   自动降级为纯规则。评估脚本 `scripts/eval_question_matching.py`
   （`--vector` 对比向量效果），校准训练 `scripts/fit_match_calibration.py`，
   指标卡生成 `scripts/build_metric_cards.py`。
-  **自由 SQL 数字溯源**（`number_guard.py`）：正文数字对照本轮工具 content/artifact，
-  允许平方米↔亩、派生百分比和用户参数；未溯源数字在正文末尾警示，并在 `message`
-  事件带 `number_guard` 元数据。**多轮追问**（`dialogue.py`）：`那第二期呢`、
-  `这个县呢`、`再按类型分`、`那林地呢` 继承上一轮完整问题；`query_state` 随最终
-  消息持久化，跨 REST/WS 恢复。中位数/方差/“超过 X”等标准库不支持的统计量不会
-  被相近条目误执行。
+  **自由 SQL 数字溯源**（`number_guard.py`）：正文数字逐条对照本轮工具 content/artifact；
+  可机械修正的单位错误直接修正，不能修正的用证据重写一次，仍失败则阻断正文只保留表格；
+  `message` 事件带 `number_guard` 的 `corrections/rewrite_attempted/blocked`。
+  **多轮追问**（`dialogue.py`）：`那第二期呢`、
+  `这个县呢`、`再按类型分`、`那林地呢` 继承上一轮完整问题；规则覆盖不了的短追问
+  走一次结构化状态抽取（只输出 resolved_question/fields/confidence）；`query_state`
+  随最终消息持久化，跨 REST/WS 恢复。
 - **套合入库（前后时相切分 → 一期套合表）**（`overlay/` + `server/overlay_routes.py` +
   前端对话窗口上方的「套合入库」按钮，大弹窗承载、不跳页；`/?view=overlay` 仍可直接访问）：上传后时相（变化监测图斑）、前时相（变更地类图斑）与可选的
   永久基本农田、生态保护红线，在 PostGIS 内按后时相边界切分前时相碎片、挂接母斑属性、
@@ -164,8 +166,8 @@ GeoAgent 是一个**通过自然语言对话完成地理空间分析与业务问
   `tools/report.py`）：`generate_briefing` 工具按默认模板生成 Word 快报（统计口径
   统计、输出到仓库外目录，默认 `%LOCALAPPDATA%/GeoAgent/reports`，可用
   `GEOAGENT_REPORTS_DIR` 覆盖）；`GET /api/files/reports/{文件名}` 提供下载，
-  前端支持 Word 在线预览（docx-preview）；TBLX→三大类默认模糊映射模板在
-  `skills/land-report/assets/tblx_categories.json`（用户提供正式规则后替换）；
+  前端支持 Word 在线预览（docx-preview）；TBLX→三大类映射资产在
+  `skills/land-report/assets/tblx_categories.json`（字典驱动，边界项待业务确认）；
   **统计期次跟随会话**：数据表由会话上方“数据表”选择框决定（`context_table(ctx)`），
   不选时才回退 datasets.json 的默认期次；标题监测期行、正文与文件名都标注所选期次。
   **预警段落已接入**：第四部分“疑似违法占地情况（预警）”按“涉及永农(SFYN)/红线(SFHX) +
@@ -222,10 +224,13 @@ GeoAgent 是一个**通过自然语言对话完成地理空间分析与业务问
   已知限制：本机 stdio MCP（`mcp_server.py`）在 `GEOAGENT_AUTH_MODE=ticket` 下会因内部的 `/api`
   调用没有登录态而失败，需要它的话要么用 dev 模式，要么把那批工具改成直接调用内部函数。
 
-- **服务层**（`server/`）：REST（会话 CRUD、模型切换、发消息）+ WebSocket 流式事件
+- **服务层**（`server/`）：REST（会话 CRUD、模型切换、发消息、回答反馈）+ WebSocket 流式事件
   （token / route / tool_call / tool_result / artifact / message / error / turn_end）。
-- **验证**：343 个 pytest 用例；7 个 golden 用例在
-  qwen3.7-max-2026-06-08 下真实跑通（7/7）。本机环境下 4~5 个 Word/模板/区县图表相关
+- **回答反馈与审计回放**：`POST /api/conversations/{id}/feedback` 把 👍/👎 + 原因写入
+  `geoagent.qa_feedback` 并追加 `data/qa_feedback.jsonl`；`scripts/replay_feedback.py`
+  导出 `data/feedback_candidates.jsonl`（status=pending），人工确认后再进问题库。
+- **验证**：353 个 pytest 用例；7 个 golden 用例在
+  qwen3.7-max-2026-06-08 下真实跑通（7/7）。本机环境下 5 个 Word/模板/区县图表相关
   用例因临时目录 `os.replace` 拒绝访问或陈旧 mock 失败（`test_manual_binding` 偶发），
   改动前的干净副本同样失败（环境问题，与代码无关）。
 - **前端骨架**（`frontend/`）：左侧历史会话列表 + 右侧会话窗口；流式展示
@@ -250,7 +255,7 @@ GeoAgent 是一个**通过自然语言对话完成地理空间分析与业务问
 - 长期记忆（记忆类型、检索、注入）
 - 工具失败兜底机制（重试 → 换工具 → 澄清 → 询问用户）
 - 文件上传与数据集管理：套合工作台已支持 Shapefile 套装 / ZIP 上传并入库成期次，其余任意数据集管理待办
-- 正式 TBLX→三大类映射（当前为默认模糊模板，待业务规则下发后替换）
+- 外部审批数据接入（违法认定仍为疑似口径）、自定义单位切换、TBLX 6 个边界类型的业务确认
 - 快报扩展：违法认定的官方审批数据接入（当前预警段落为“疑似”口径）、自定义单位切换
 - 前端完善：更多 artifact 类型（图片/图表）、地图交互、多轮上下文展示
 - 权限分级（按 Role/NodesAuth 限制套合入库、删除期次等重操作）、快报文件按用户隔离、
@@ -290,7 +295,7 @@ GeoAgent/
 │       │   ├── executor.py      # 异步执行器（校验、错误归一化）
 │       │   ├── result.py        # ToolResult / Artifact
 │       │   ├── accessibility.py # 养老可达性分析工具（E2SFCA / 供需匹配）
-│       │   ├── labels.py        # 查询结果中文表头 / TBLX 中文名映射 / 面积按亩展示
+│       │   ├── labels.py        # 查询结果中文表头 / TBLX/TZ/QSX/CZCSXM 映射 / 面积按亩展示
 │       │   ├── units.py         # 面积单位换算（库内平方米 → 展示亩）
 │       │   ├── categories.py    # TBLX→三大类 映射加载器（数据在技能资产 JSON）
 │       │   ├── chart.py         # 统计图表生成（make_chart：饼图/柱状图/折线图）
@@ -340,7 +345,7 @@ GeoAgent/
 │       └── style.css            # 全局样式
 ├── skills/                      # 技能目录（每个子目录一个技能：{name}/SKILL.md）
 │   ├── land-report/             # 土地变化监测快报（默认模板 + 统计需求清单）
-│   ├── qa-library/              # 标准问题库 + 语义资产 + 期次（assets/question_library.json、terms.json、metric_cards.json、match_calibration.json、question_variants.json、question_holdout.json、question_locked.json、datasets.json）
+│   ├── qa-library/              # 标准问题库 + 语义资产 + 期次（assets/question_library.json、terms.json、metric_cards.json、match_calibration.json、question_variants.json、question_holdout.json、question_locked.json、datasets.json、field_dictionaries.json、data_versions.json）
 │   └── README.md                # 技能编写说明
 └── README.md
 ```
@@ -493,7 +498,7 @@ GeoAgent/
 | --- | --- | --- | --- |
 | `turn_start` | 后端→前端 | `conversation_id` | 一轮对话开始 |
 | `route` | 后端→前端 | `target`, `reason` | 本轮使用的智能体（sql / elder_care / chat，规划扩展 carrying）；会话选择了智能体时 reason 为“会话选择的智能体”，表示未经路由模型判断 |
-| `standard_match` | 后端→前端 | `matched`, `mode`, `decision`, `entry_id`, `score`, `confidence`, `p_correct`, `calibrated`, `margin`, `risk`, `threshold`, `p_threshold`, `vector_used`, `vector_entries`, `judge_used`, `judge_entry`, `judge_confidence`, `judge_reason`, `resolved_question`, `reasons`, `slots`, `slot_labels`, `candidates`, `candidate_details`, `caliber`, `dataset_id`, `dataset_label`, `table` | 语义预匹配结果（`decision=execute` 才确定性执行；`candidates/clarify` 不查库；`fallback` 转自由 SQL；`confidence` 为校准后的 p(correct)；`resolved_question` 为多轮补全后的问题） |
+| `standard_match` | 后端→前端 | `matched`, `mode`, `decision`, `entry_id`, `score`, `confidence`, `p_correct`, `calibrated`, `margin`, `risk`, `threshold`, `p_threshold`, `vector_used`, `vector_entries`, `judge_used`, `judge_entry`, `judge_confidence`, `judge_reason`, `resolved_question`, `data_version`, `reasons`, `slots`, `slot_labels`, `candidates`, `candidate_details`, `caliber`, `dataset_id`, `dataset_label`, `table` | 语义预匹配结果（`decision=execute` 才确定性执行；`candidates/clarify` 不查库；`fallback` 转自由 SQL；`confidence` 为校准后的 p(correct)；`resolved_question` 为多轮补全后的问题） |
 | `token` | 后端→前端 | `delta` | 流式增量文本 |
 | `tool_call` | 后端→前端 | `id`, `name`, `arguments` | 正在调用工具 |
 | `tool_result` | 后端→前端 | `id`, `name`, `is_error`, `content` | 工具结果摘要 |

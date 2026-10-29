@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Optional
 
 from .datasets import DatasetRegistry, default_registry, find_period
+from .qa_judge import _extract_json
 
 _GENERIC_COUNTY = {
     "每个县", "各县", "各区县", "区县", "县区", "市县", "行政区", "县级",
@@ -232,3 +234,72 @@ def followup_hint(ctx: Any) -> str:
             "- 查询与回答必须按补全后的问题理解；如与用户原话冲突，以补全后的问题为准。",
         ]
     )
+
+
+_FOLLOWUP_CUES = ("那", "呢", "再", "它", "这个", "那个", "换成", "比", "继续", "然后")
+
+
+async def resolve_followup_smart(
+    ctx: Any, question: str
+) -> tuple[str, dict[str, Any]]:
+    """先规则补全；规则覆盖不了的短追问再用 LLM 做结构化指代消解。
+
+    LLM 只产出 resolved_question 与变更字段，不执行 SQL、不做业务判断；
+    解析失败/置信度低时完全回退到规则结果。
+    """
+    effective, info = resolve_followup(ctx, question)
+    if info.get("kind"):
+        return effective, info
+    text = str(question or "").strip()
+    state = dict(getattr(ctx, "query_state", None) or {})
+    previous = str(state.get("effective_question") or "")
+    llm = getattr(ctx, "llm", None)
+    if (
+        llm is None
+        or not previous
+        or len(text) > 40
+        or not any(cue in text for cue in _FOLLOWUP_CUES)
+    ):
+        return effective, info
+    prompt = (
+        "把用户本轮追问补全成一个完整问题。只做指代消解，不要执行查询、不要编造数字。\n"
+        "只输出 JSON："
+        '{"is_followup":true,"resolved_question":"完整问题",'
+        '"changed_fields":["period|county|dimension|subject|unit|other"],"confidence":0.0}\n\n'
+        f"上一轮完整问题：{previous}\n"
+        f"上一轮状态：{json.dumps(state, ensure_ascii=False)}\n"
+        f"本轮原话：{text}"
+    )
+    try:
+        message = await llm.chat(
+            model=str(getattr(ctx, "model", "") or ""),
+            messages=[
+                {"role": "system", "content": "你是多轮地理统计问答的指代消解器。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=300,
+        )
+        parsed = _extract_json(str(getattr(message, "content", "") or ""))
+    except Exception:
+        return effective, info
+    if not isinstance(parsed, dict) or not parsed.get("is_followup"):
+        return effective, info
+    resolved = str(parsed.get("resolved_question") or "").strip()
+    try:
+        confidence = float(parsed.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if not resolved or resolved == text or len(resolved) > 160 or confidence < 0.6:
+        return effective, info
+    fields = parsed.get("changed_fields")
+    fields = [str(item) for item in fields] if isinstance(fields, list) else []
+    if "period" in fields:
+        # 用户在本轮明确换了期次，不能被前端上一轮的数据表选择覆盖。
+        ctx.dataset_id = ""
+    return resolved, {
+        "kind": "structured",
+        "rewritten": resolved,
+        "confidence": confidence,
+        "fields": fields,
+    }

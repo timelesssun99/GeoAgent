@@ -1,8 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
+
+
+class FeedbackCreate(BaseModel):
+    rating: Literal["up", "down"]
+    reason: str = ""
+    message_id: Optional[str] = None
+    question: str = ""
+    answer: str = ""
 
 
 class ConversationCreate(BaseModel):

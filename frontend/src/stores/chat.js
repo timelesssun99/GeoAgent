@@ -96,13 +96,17 @@ function parseArgs(raw) {
 function buildRenderMessages(rawMessages) {
   const out = []
   let assistant = null
+  let question = ''
   for (const m of rawMessages) {
     if (m.role === 'user') {
       assistant = null
+      question = m.content || ''
       out.push({ id: uid(), role: 'user', content: m.content || '' })
     } else if (m.role === 'assistant') {
       assistant = {
         id: uid(),
+        backendId: m.id || '',
+        question,
         role: 'assistant',
         // 带工具调用的 assistant 消息里的文字只是过程话术，正文由紧随其后的
         // 最终 assistant 消息展示，这里不再重复显示，避免与工具卡片抢版面。
@@ -157,6 +161,24 @@ async function refreshConversations() {
   chat.conversations = data.conversations || []
 }
 
+async function submitFeedback(message, rating, reason = '') {
+  if (!chat.currentId || !message) return false
+  try {
+    await api.submitFeedback(chat.currentId, {
+      rating,
+      reason: reason || (rating === 'up' ? '准确' : '不准确'),
+      message_id: message.backendId || null,
+      question: message.question || '',
+      answer: message.content || '',
+    })
+    message.feedback = rating
+    return true
+  } catch (err) {
+    chat.error = err.message
+    return false
+  }
+}
+
 function disconnect() {
   if (chat._ws) {
     chat._ws.onclose = null
@@ -199,6 +221,7 @@ function handleEvent(event) {
       chat._streamAssistant = {
         id: uid(),
         role: 'assistant',
+        question: [...chat.messages].reverse().find((m) => m.role === 'user')?.content || '',
         content: '',
         streaming: true,
         route: '',

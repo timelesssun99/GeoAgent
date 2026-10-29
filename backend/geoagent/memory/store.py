@@ -185,6 +185,36 @@ class ConversationStore:
             )
             await conn.execute(
                 f"""
+                CREATE TABLE IF NOT EXISTS {schema}.qa_feedback (
+                    id             bigserial PRIMARY KEY,
+                    conversation_id text NOT NULL
+                                    REFERENCES {schema}.conversations(id) ON DELETE CASCADE,
+                    message_id      bigint,
+                    user_id         text NOT NULL DEFAULT '',
+                    user_name       text NOT NULL DEFAULT '',
+                    rating          text NOT NULL,
+                    reason          text NOT NULL DEFAULT '',
+                    question        text NOT NULL DEFAULT '',
+                    answer          text NOT NULL DEFAULT '',
+                    entry_id        text NOT NULL DEFAULT '',
+                    dataset_id      text NOT NULL DEFAULT '',
+                    answer_origin   text NOT NULL DEFAULT '',
+                    payload         jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                    created_at      timestamptz NOT NULL DEFAULT now()
+                )
+                """
+            )
+            await conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS qa_feedback_created_idx
+                    ON {schema}.qa_feedback (created_at DESC)
+                """
+            )
+            await conn.execute(
+                f"COMMENT ON TABLE {schema}.qa_feedback IS '问答反馈：准确/不准确 + 原因，供审计回放与问题库候选'"
+            )
+            await conn.execute(
+                f"""
                 CREATE TABLE IF NOT EXISTS {schema}.mcp_calls (
                     id          bigserial PRIMARY KEY,
                     caller      text NOT NULL DEFAULT '',
@@ -398,13 +428,109 @@ class ConversationStore:
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
             rows = await conn.fetch(
                 f"""
-                SELECT payload FROM {self.schema}.conversation_messages
+                SELECT id, payload FROM {self.schema}.conversation_messages
                  WHERE conversation_id = $1
                  ORDER BY id
                 """,
                 conversation_id,
             )
-        return [dict(row["payload"]) for row in rows]
+        return [
+            {
+                **dict(row["payload"]),
+                "id": str(row["id"]),
+                "conversation_id": conversation_id,
+            }
+            for row in rows
+        ]
+
+    async def add_feedback(
+        self,
+        conversation_id: str,
+        *,
+        rating: str,
+        reason: str = "",
+        message_id: Optional[int] = None,
+        user_id: str = "",
+        user_name: str = "",
+        question: str = "",
+        answer: str = "",
+    ) -> Optional[dict[str, Any]]:
+        """记录一条回答反馈；message_id 缺省时取该会话最后一条 assistant 消息。"""
+        await self._ensure_connected()
+        async with self._pool.acquire() as conn:  # type: ignore[union-attr]
+            if message_id is not None:
+                row = await conn.fetchrow(
+                    f"""
+                    SELECT id, payload FROM {self.schema}.conversation_messages
+                     WHERE id = $1 AND conversation_id = $2
+                    """,
+                    message_id,
+                    conversation_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    f"""
+                    SELECT id, payload FROM {self.schema}.conversation_messages
+                     WHERE conversation_id = $1 AND role = 'assistant'
+                     ORDER BY id DESC LIMIT 1
+                    """,
+                    conversation_id,
+                )
+            if row is None:
+                return None
+            payload = dict(row["payload"])
+            target_id = int(row["id"])
+            if not question:
+                previous = await conn.fetchrow(
+                    f"""
+                    SELECT payload FROM {self.schema}.conversation_messages
+                     WHERE conversation_id = $1 AND role = 'user' AND id < $2
+                     ORDER BY id DESC LIMIT 1
+                    """,
+                    conversation_id,
+                    target_id,
+                )
+                if previous is not None:
+                    question = str(dict(previous["payload"]).get("content") or "")
+            answer = answer or str(payload.get("content") or "")
+            caliber = payload.get("caliber") if isinstance(payload.get("caliber"), dict) else {}
+            query_state = payload.get("query_state") if isinstance(payload.get("query_state"), dict) else {}
+            entry_id = str(caliber.get("metric_id") or "")
+            dataset_id = str(caliber.get("period_id") or query_state.get("dataset_id") or "")
+            answer_origin = str(payload.get("answer_origin") or "")
+            feedback = await conn.fetchrow(
+                f"""
+                INSERT INTO {self.schema}.qa_feedback
+                    (conversation_id, message_id, user_id, user_name, rating, reason,
+                     question, answer, entry_id, dataset_id, answer_origin, payload)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+                RETURNING id, created_at
+                """,
+                conversation_id,
+                target_id,
+                user_id,
+                user_name,
+                rating,
+                reason[:500],
+                question[:2000],
+                answer[:8000],
+                entry_id,
+                dataset_id,
+                answer_origin,
+                json.dumps(payload, ensure_ascii=False, default=_json_default),
+            )
+            return {
+                "id": str(feedback["id"]),
+                "created_at": feedback["created_at"].isoformat(),
+                "message_id": str(target_id),
+                "rating": rating,
+                "reason": reason,
+                "question": question,
+                "answer": answer,
+                "entry_id": entry_id,
+                "dataset_id": dataset_id,
+                "answer_origin": answer_origin,
+            }
 
     async def rollback_last_user_turn(self, conversation_id: str) -> Optional[dict[str, Any]]:
         """撤回最后一条用户消息及其后的全部回答；返回被撤回的用户消息。"""
@@ -512,6 +638,7 @@ class MemoryConversationStore:
         self._conversations: dict[str, dict[str, Any]] = {}
         self._messages: dict[str, list[dict[str, Any]]] = {}
         self._mcp_calls: list[dict[str, Any]] = []
+        self._feedback: list[dict[str, Any]] = []
         self._pending: dict[str, list[dict[str, Any]]] = {}
         self._pending_title: dict[str, str] = {}
 
@@ -625,7 +752,62 @@ class MemoryConversationStore:
         await self.flush(conversation_id)
 
     async def messages(self, conversation_id: str) -> list[dict[str, Any]]:
-        return [dict(item) for item in self._messages.get(conversation_id, [])]
+        return [
+            {
+                **dict(item),
+                "id": str(item.get("id") or f"m{index}"),
+                "conversation_id": conversation_id,
+            }
+            for index, item in enumerate(self._messages.get(conversation_id, []))
+        ]
+
+    async def add_feedback(
+        self,
+        conversation_id: str,
+        *,
+        rating: str,
+        reason: str = "",
+        message_id: Optional[int] = None,
+        user_id: str = "",
+        user_name: str = "",
+        question: str = "",
+        answer: str = "",
+    ) -> Optional[dict[str, Any]]:
+        messages = self._messages.get(conversation_id, [])
+        target = None
+        if message_id is not None:
+            target = next(
+                (m for m in messages if str(m.get("id")) == str(message_id)),
+                None,
+            )
+        if target is None:
+            target = next(
+                (m for m in reversed(messages) if m.get("role") == "assistant"),
+                None,
+            )
+        if target is None:
+            return None
+        if not question:
+            index = messages.index(target)
+            for item in reversed(messages[:index]):
+                if item.get("role") == "user":
+                    question = str(item.get("content") or "")
+                    break
+        answer = answer or str(target.get("content") or "")
+        item = {
+            "id": str(len(self._feedback) + 1),
+            "conversation_id": conversation_id,
+            "message_id": str(target.get("id") or ""),
+            "user_id": user_id,
+            "user_name": user_name,
+            "rating": rating,
+            "reason": reason,
+            "question": question,
+            "answer": answer,
+            "created_at": _utc_now_iso(),
+        }
+        self._feedback.append(item)
+        return item
 
     async def record_mcp_call(
         self,

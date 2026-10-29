@@ -20,6 +20,8 @@ description: 标准问题库匹配与问数执行依据；先做语义槽位理�
 | `assets/terms.json` | 语义层词表：主体/过滤/聚合/维度/前后时项/转换方向/风险规则/决策阈值 |
 | `assets/metric_cards.json` | 42 条标准问题的指标卡（结构化的主体、聚合、维度、风险） |
 | `assets/match_calibration.json` | top-1 p(correct) 校准参数（逻辑回归，由 `scripts/fit_match_calibration.py` 生成） |
+| `assets/field_dictionaries.json` | TZ / QSX / CZCSXM 字段业务字典；未确认值保留原码 |
+| `assets/data_versions.json` | 数据/口径/映射版本与变更记录 |
 | `assets/question_holdout.json` | 38 条独立留出问法（dev/locked 各半），用于评估未见问法 |
 | `assets/question_locked.json` | 19 条锁定评估问法，编写后不参与调参 |
 | `assets/datasets.json` | 期次数据集登记（一张套合表 = 一期） |

@@ -180,7 +180,7 @@ def test_remember_query_state_keeps_county_and_dataset():
 
 
 @pytest.mark.asyncio
-async def test_sql_agent_finalize_attaches_number_guard_and_query_state():
+async def test_sql_agent_finalize_blocks_unfixable_numbers_without_llm():
     ctx = _ctx()
     ctx.current_question = "建设用地占比是多少"
     ctx.effective_question = "建设用地占比是多少"
@@ -192,5 +192,94 @@ async def test_sql_agent_finalize_attaches_number_guard_and_query_state():
     result = await agent.finalize_answer(ctx, final)
     guard = ctx.answer_metadata["number_guard"]
     assert guard["ok"] is False
-    assert "数字溯源" in result.content
+    assert guard["blocked"] is True
+    assert "无法与查询结果对应" in result.content
     assert ctx.answer_metadata["query_state"]["effective_question"] == "建设用地占比是多少"
+
+
+@pytest.mark.asyncio
+async def test_sql_agent_finalize_corrects_unit_scale_error():
+    ctx = _ctx()
+    ctx.current_question = "第二期最大图斑面积是多少"
+    ctx.effective_question = "第二期最大图斑面积是多少"
+    ctx.turn_tool_messages = [_tool("第二期最大图斑面积 436612.85 平方米")]
+    agent = SQLAgent()
+    final = AssistantMessage(content="第二期最大图斑面积约 654,919.28 亩。", model="test")
+    result = await agent.finalize_answer(ctx, final)
+    guard = ctx.answer_metadata["number_guard"]
+    assert guard["blocked"] is False
+    assert guard["ok"] is True
+    assert "654.92" in result.content
+    assert "654,919.28" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_sql_agent_finalize_rewrites_unsafe_answer_once():
+    class _RewriteLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, model, messages, tools=None, temperature=None, max_tokens=None):
+            self.calls += 1
+            return AssistantMessage(content="该占比无法从查询结果确认，请以表格为准。", model=model)
+
+    ctx = _ctx()
+    ctx.current_question = "建设用地占比是多少"
+    ctx.effective_question = "建设用地占比是多少"
+    ctx.turn_tool_messages = [
+        _tool("建设用地 2954687.33 平方米；总面积 20586122.73 平方米")
+    ]
+    ctx.llm = _RewriteLLM()
+    agent = SQLAgent()
+    final = AssistantMessage(content="建设用地占比 18.2%。", model="test")
+    result = await agent.finalize_answer(ctx, final)
+    guard = ctx.answer_metadata["number_guard"]
+    assert ctx.llm.calls == 1
+    assert guard["rewrite_attempted"] is True
+    assert guard["blocked"] is False
+    assert "无法从查询结果确认" in result.content
+
+
+
+@pytest.mark.asyncio
+async def test_structured_followup_uses_llm_when_rules_cannot_resolve():
+    from geoagent.core.llm import AssistantMessage
+    from geoagent.dialogue import resolve_followup_smart
+
+    class _LLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, model, messages, tools=None, temperature=None, max_tokens=None):
+            self.calls += 1
+            return AssistantMessage(
+                content='{"is_followup":true,"resolved_question":"耕地面积按县统计",'
+                        '"changed_fields":["dimension"],"confidence":0.86}',
+                model=model,
+            )
+
+    ctx = _ctx()
+    ctx.query_state = {"effective_question": "耕地面积是多少"}
+    ctx.llm = _LLM()
+    effective, info = await resolve_followup_smart(ctx, "那它呢")
+    assert info["kind"] == "structured"
+    assert effective == "耕地面积按县统计"
+    assert info["confidence"] == 0.86
+    assert ctx.llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_structured_followup_falls_back_on_bad_json():
+    from geoagent.core.llm import AssistantMessage
+    from geoagent.dialogue import resolve_followup_smart
+
+    class _LLM:
+        async def chat(self, model, messages, tools=None, temperature=None, max_tokens=None):
+            return AssistantMessage(content="不是 JSON", model=model)
+
+    ctx = _ctx()
+    ctx.query_state = {"effective_question": "耕地面积是多少"}
+    ctx.llm = _LLM()
+    effective, info = await resolve_followup_smart(ctx, "那它呢")
+    assert effective == "那它呢"
+    assert info == {}

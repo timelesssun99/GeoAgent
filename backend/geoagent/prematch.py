@@ -340,26 +340,28 @@ def _compose(
     caliber: Optional[dict[str, Any]] = None,
     verification: Optional[dict[str, Any]] = None,
 ) -> str:
-    """组装确定性正文：先给结论，再写清口径、范围、期次、单位与校验。"""
-    lines = [f"## {entry.get('question', '标准问题')}", str(executed.body or "").strip()]
-    caliber_text = str(entry.get("answer_hint") or entry.get("intent") or "").strip()
-    scope = ""
+    """组装确定性正文：先给结论，再用短行说明口径、期次、范围与校验。"""
+    body = str(executed.body or "").strip()
+    lines = [body] if body else []
+    caliber_text = str(entry.get("intent") or entry.get("answer_hint") or "").strip()
+    # 对外只保留用户能看懂的口径，去掉 TBLX/TZ/MJ 等字段名括号。
+    caliber_text = re.sub(
+        r"[（(][^）)]*(?:TBLX|TZ|DLBM|DLMC|MJ|SFYN|SFHX)[^）)]*[）)]",
+        "",
+        caliber_text,
+    ).strip()
+    tail = [f"统计口径：{caliber_text}"] if caliber_text else []
     if period is not None:
-        scope = f"数据期次：{period.label}（{period.table}）"
-    tail = [
-        item
-        for item in [
-            f"统计口径：{caliber_text}" if caliber_text else "",
-            scope,
-            f"统计范围：{caliber.get('scope')}" if caliber and caliber.get("scope") else "",
-            f"单位：{normalize_unit(executed.unit)}" if executed.unit else "",
-            f"风险等级：{_risk_label(str(caliber.get('risk')))}" if caliber else "",
-        ]
-        if item
-    ]
-    if tail:
-        lines.append("；".join(tail) + "。")
+        tail.append(f"数据期次：{period.label}")
+    if caliber and caliber.get("scope") and str(caliber.get("scope")) != "全库":
+        tail.append(f"统计范围：{caliber.get('scope')}")
+    if executed.unit:
+        tail.append(f"单位：{normalize_unit(executed.unit)}")
     risk = str((caliber or {}).get("risk") or "")
+    if risk in {"medium", "high"}:
+        tail.append(f"风险等级：{_risk_label(risk)}")
+    if tail:
+        lines.append("\n".join(tail))
     if risk == "high":
         lines.append("风险提示：该口径只能作为“疑似”线索，违法认定需叠加审批、执法或用地管理数据。")
     elif risk == "medium":
@@ -369,9 +371,6 @@ def _compose(
         if text:
             prefix = "⚠ " if not verification.get("ok") else ""
             lines.append(prefix + text)
-    lines.append(
-        f"（本回答由标准问题库条目 {entry.get('id')} 直接执行，未经过自由 SQL。）"
-    )
     return "\n\n".join(lines)
 
 
@@ -413,7 +412,7 @@ def _candidate_lines(match: dict[str, Any], limit: int = 3) -> list[str]:
 def _clarify_reply(match: dict[str, Any]) -> str:
     """低置信/对抗问法的定向澄清：不查库、给 2~3 个可选项。"""
     slots = str((match.get("slots") or {}).get("side") or "")
-    lines = ["## 需要先确认统计口径"]
+    lines = ["需要先确认统计口径。"]
     if (match.get("slots") or {}).get("adversarial"):
         lines.append(
             "你的问题里包含与库内口径冲突的要求（例如要求编造、改变单位或直接定性）。"
@@ -433,7 +432,7 @@ def _clarify_reply(match: dict[str, Any]) -> str:
 def _candidates_reply(match: dict[str, Any]) -> str:
     """多候选接近时让用户选口径，而不是静默转自由 SQL。"""
     lines = [
-        "## 我还不确定你要统计哪一项",
+        "我还不确定你要统计哪一项。",
         "问题比较笼统，最接近的标准问题不止一个。请先选择口径：",
     ]
     lines.extend(_candidate_lines(match))

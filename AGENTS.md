@@ -224,7 +224,7 @@ GeoAgent 是一个**通过自然语言对话完成地理空间分析与业务问
 
 - **服务层**（`server/`）：REST（会话 CRUD、模型切换、发消息）+ WebSocket 流式事件
   （token / route / tool_call / tool_result / artifact / message / error / turn_end）。
-- **验证**：341 个 pytest 用例；7 个 golden 用例在
+- **验证**：343 个 pytest 用例；7 个 golden 用例在
   qwen3.7-max-2026-06-08 下真实跑通（7/7）。本机环境下 4~5 个 Word/模板/区县图表相关
   用例因临时目录 `os.replace` 拒绝访问或陈旧 mock 失败（`test_manual_binding` 偶发），
   改动前的干净副本同样失败（环境问题，与代码无关）。

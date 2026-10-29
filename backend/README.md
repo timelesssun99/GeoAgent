@@ -430,6 +430,7 @@ backend/.venv/Scripts/python.exe scripts/scrub_conversation_leaks.py --apply  # 
    由 `terms.json` 抬高自动执行门槛；
 3. **确定性执行**：`execute` 时按条目的 `strategy` 调确定性工具或执行参考 SQL，
    正文由结果生成，数字与口径不经过模型，并附口径卡（主体/范围/期次/单位/风险）；
+   正文不使用 Markdown `#` 标题，图斑类型不附字段编码，期次不展示内部表名；
 4. **结果校验**：`qa_verify.py` 校验空结果、负值、比例范围、净变化=流入-流出、
    按类型分项合计、区县筛选；校验失败会在正文显著标注，不把可疑数字当结论；
 5. **候选/澄清**：`candidates` 给 2~3 个最接近的标准问题让用户选；`clarify` 只问一个

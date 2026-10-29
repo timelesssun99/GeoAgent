@@ -7,6 +7,7 @@ SQL 纪律、确定性工具优先级与正文/卡片分工。每个工具“是
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from ..core.agent import Agent
@@ -169,7 +170,8 @@ class SQLAgent(Agent):
         return result
 
     async def finalize_answer(self, ctx: Any, final: Any) -> Any:
-        """自由 SQL 回答出口：做一次“正文数字 ↔ 本轮工具结果”的溯源。"""
+        """自由 SQL 回答出口：统一清理标题井号，并做一次数字溯源。"""
+        final.content = re.sub(r"(?m)^\s*#{1,6}\s*", "", final.content or "")
         start = int(getattr(ctx, "_turn_start_index", 0) or 0)
         messages = list(getattr(ctx, "turn_tool_messages", None) or [])
         if not messages:

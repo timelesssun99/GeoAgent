@@ -1,9 +1,8 @@
-"""字段字典、期次版本与反馈存储回归。"""
+"""字段字典、期次版本与 TBLX 映射资产回归。"""
 
 from __future__ import annotations
 
 from geoagent.datasets import default_registry
-from geoagent.memory.store import MemoryConversationStore
 from geoagent.tools.field_dictionaries import label_for, load_dictionaries, prompt_summary
 from geoagent.tools.labels import humanize_table
 
@@ -39,27 +38,6 @@ def test_disabled_validation_period_is_hidden_and_versioned():
     assert "2026_3" not in {period.id for period in registry.periods}
     assert registry.get("2026_3") is None
     assert registry.default is not None and registry.default.version
-
-
-def test_memory_feedback_records_question_and_answer():
-    import asyncio
-
-    async def run():
-        store = MemoryConversationStore()
-        conv = await store.create(title="feedback")
-        await store.add_message(conv["id"], {"role": "user", "content": "耕地面积是多少"})
-        await store.add_message(
-            conv["id"], {"role": "assistant", "content": "耕地面积 100 亩。"}
-        )
-        item = await store.add_feedback(
-            conv["id"], rating="down", reason="数字不对", question="", answer=""
-        )
-        assert item is not None
-        assert item["question"] == "耕地面积是多少"
-        assert item["answer"] == "耕地面积 100 亩。"
-        assert item["rating"] == "down"
-
-    asyncio.run(run())
 
 
 def test_tblx_mapping_asset_is_dictionary_driven():

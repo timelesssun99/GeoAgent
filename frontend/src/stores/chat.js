@@ -96,17 +96,13 @@ function parseArgs(raw) {
 function buildRenderMessages(rawMessages) {
   const out = []
   let assistant = null
-  let question = ''
   for (const m of rawMessages) {
     if (m.role === 'user') {
       assistant = null
-      question = m.content || ''
       out.push({ id: uid(), role: 'user', content: m.content || '' })
     } else if (m.role === 'assistant') {
       assistant = {
         id: uid(),
-        backendId: m.id || '',
-        question,
         role: 'assistant',
         // 带工具调用的 assistant 消息里的文字只是过程话术，正文由紧随其后的
         // 最终 assistant 消息展示，这里不再重复显示，避免与工具卡片抢版面。
@@ -203,7 +199,6 @@ function handleEvent(event) {
       chat._streamAssistant = {
         id: uid(),
         role: 'assistant',
-        question: [...chat.messages].reverse().find((m) => m.role === 'user')?.content || '',
         content: '',
         streaming: true,
         route: '',

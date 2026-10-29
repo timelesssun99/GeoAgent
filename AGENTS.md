@@ -224,12 +224,9 @@ GeoAgent 是一个**通过自然语言对话完成地理空间分析与业务问
   已知限制：本机 stdio MCP（`mcp_server.py`）在 `GEOAGENT_AUTH_MODE=ticket` 下会因内部的 `/api`
   调用没有登录态而失败，需要它的话要么用 dev 模式，要么把那批工具改成直接调用内部函数。
 
-- **服务层**（`server/`）：REST（会话 CRUD、模型切换、发消息、回答反馈）+ WebSocket 流式事件
+- **服务层**（`server/`）：REST（会话 CRUD、模型切换、发消息）+ WebSocket 流式事件
   （token / route / tool_call / tool_result / artifact / message / error / turn_end）。
-- **回答反馈与审计回放**：`POST /api/conversations/{id}/feedback` 把 👍/👎 + 原因写入
-  `geoagent.qa_feedback` 并追加 `data/qa_feedback.jsonl`；`scripts/replay_feedback.py`
-  导出 `data/feedback_candidates.jsonl`（status=pending），人工确认后再进问题库。
-- **验证**：353 个 pytest 用例；7 个 golden 用例在
+- **验证**：352 个 pytest 用例；7 个 golden 用例在
   qwen3.7-max-2026-06-08 下真实跑通（7/7）。本机环境下 5 个 Word/模板/区县图表相关
   用例因临时目录 `os.replace` 拒绝访问或陈旧 mock 失败（`test_manual_binding` 偶发），
   改动前的干净副本同样失败（环境问题，与代码无关）。

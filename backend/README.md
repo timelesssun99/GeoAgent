@@ -72,7 +72,6 @@ Microsoft Word（Windows）或 LibreOffice 时同步生成 PDF；可用
 | GET | `/api/conversations/{id}/messages` | 历史消息（含 artifacts） |
 | PUT | `/api/conversations/{id}/model` | 切换该会话的模型 |
 | POST | `/api/conversations/{id}/messages` | 发消息（非流式，返回最终回复） |
-| POST | `/api/conversations/{id}/feedback` | 回答反馈（`rating=up/down`、`reason`、`message_id`），落库并追加审计 |
 | WS | `/api/conversations/{id}/ws` | 流式对话：token / tool_call / tool_result / artifact / message 事件 |
 
 会话列表按创建时间倒序返回（最新在前）。新建会话默认为"新会话"标题，

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import (
@@ -25,7 +22,7 @@ from ..core.llm import LLMConfigurationError
 from ..memory.memory import NoopMemory
 from ..memory.session import ConversationSession
 from ..memory.store import ConversationStore
-from .schemas import ConversationCreate, FeedbackCreate, ModelSwitch, UserMessage
+from .schemas import ConversationCreate, ModelSwitch, UserMessage
 
 router = APIRouter(prefix="/api")
 
@@ -180,51 +177,6 @@ async def get_messages(
     store = _store(request)
     await _conversation_or_404(store, conversation_id, user)
     return {"messages": await store.messages(conversation_id)}
-
-
-@router.post("/conversations/{conversation_id}/feedback")
-async def submit_feedback(
-    conversation_id: str,
-    body: FeedbackCreate,
-    request: Request,
-    user: UserIdentity = Depends(current_user),
-) -> dict[str, Any]:
-    """回答反馈：落库并追加 JSONL，供审计回放与问题库候选。"""
-    store = _store(request)
-    await _conversation_or_404(store, conversation_id, user)
-    message_id = int(body.message_id) if str(body.message_id or "").isdigit() else None
-    feedback = await store.add_feedback(
-        conversation_id,
-        rating=body.rating,
-        reason=body.reason.strip(),
-        message_id=message_id,
-        user_id=user.id,
-        user_name=user.display_name,
-        question=body.question.strip(),
-        answer=body.answer.strip(),
-    )
-    if feedback is None:
-        raise HTTPException(status_code=404, detail="message not found")
-    _append_feedback_jsonl(request, feedback)
-    return {"ok": True, "feedback": feedback}
-
-
-def _append_feedback_jsonl(request: Request, feedback: dict[str, Any]) -> None:
-    data_dir = getattr(request.app.state.settings, "data_dir", None)
-    if data_dir is None:
-        return
-    try:
-        path = Path(data_dir) / "qa_feedback.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        record = {
-            **feedback,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError:
-        # 审计文件写失败不影响用户反馈落库
-        pass
 
 
 @router.put("/conversations/{conversation_id}/model")

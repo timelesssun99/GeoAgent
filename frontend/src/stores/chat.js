@@ -107,7 +107,6 @@ function buildRenderMessages(rawMessages) {
         id: uid(),
         backendId: m.id || '',
         question,
-        feedback: m.feedback || '',
         role: 'assistant',
         // 带工具调用的 assistant 消息里的文字只是过程话术，正文由紧随其后的
         // 最终 assistant 消息展示，这里不再重复显示，避免与工具卡片抢版面。
@@ -160,24 +159,6 @@ async function refreshMessages() {
 async function refreshConversations() {
   const data = await api.listConversations()
   chat.conversations = data.conversations || []
-}
-
-async function submitFeedback(message, rating, reason = '') {
-  if (!chat.currentId || !message) return false
-  try {
-    await api.submitFeedback(chat.currentId, {
-      rating,
-      reason: reason || (rating === 'up' ? '准确' : '不准确'),
-      message_id: message.backendId || null,
-      question: message.question || '',
-      answer: message.content || '',
-    })
-    message.feedback = rating
-    return true
-  } catch (err) {
-    chat.error = err.message
-    return false
-  }
 }
 
 function disconnect() {

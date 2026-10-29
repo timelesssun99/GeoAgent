@@ -1713,22 +1713,3 @@ button {
 .artifact-table tbody tr.row-active {
   background: rgba(217, 48, 37, 0.12);
 }
-
-/* 回答反馈：常显，不跟随用户气泡 hover */
-.feedback-actions {
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
-  opacity: 1;
-}
-.feedback-actions .action-btn {
-  width: auto;
-  height: 26px;
-  padding: 0 8px;
-  font-size: 12px;
-  color: var(--text-3);
-}
-.feedback-done {
-  font-size: 12px;
-  color: var(--text-3);
-}

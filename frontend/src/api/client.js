@@ -44,11 +44,6 @@ export const api = {
     request('/conversations', { method: 'POST', body: JSON.stringify(payload) }),
   getConversation: (id) => request(`/conversations/${id}`),
   getMessages: (id) => request(`/conversations/${id}/messages`),
-  submitFeedback: (id, payload) =>
-    request(`/conversations/${id}/feedback`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
   deleteConversation: (id) =>
     request(`/conversations/${id}`, { method: 'DELETE' }),
   switchModel: (id, model) =>

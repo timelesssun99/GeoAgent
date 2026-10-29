@@ -100,20 +100,6 @@
           {{ message.content }}<span v-if="message.streaming" class="cursor" />
         </template>
       </div>
-
-      <div v-if="!message.streaming && message.content" class="msg-actions feedback-actions">
-        <span v-if="message.feedback" class="feedback-done">
-          {{ message.feedback === 'up' ? '已反馈：准确' : '已反馈：不准确' }}
-        </span>
-        <template v-else>
-          <button class="action-btn feedback-btn" title="回答准确" @click="sendFeedback('up')">
-            👍 准确
-          </button>
-          <button class="action-btn feedback-btn" title="回答不准确" @click="sendFeedback('down')">
-            👎 不准确
-          </button>
-        </template>
-      </div>
     </div>
 
     <div v-else-if="message.role === 'tool-standalone'" class="assistant-card">
@@ -221,10 +207,6 @@ async function copyText() {
   } catch {
     // 剪贴板权限被拒时静默忽略
   }
-}
-
-async function sendFeedback(rating) {
-  await chat.submitFeedback(props.message, rating)
 }
 
 async function startEdit() {

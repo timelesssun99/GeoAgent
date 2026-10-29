@@ -434,11 +434,27 @@ class ConversationStore:
                 """,
                 conversation_id,
             )
+            try:
+                feedback_rows = await conn.fetch(
+                    f"""
+                    SELECT message_id, rating FROM {self.schema}.qa_feedback
+                     WHERE conversation_id = $1
+                    """,
+                    conversation_id,
+                )
+                ratings = {
+                    str(row["message_id"]): str(row["rating"])
+                    for row in feedback_rows
+                    if row["message_id"] is not None
+                }
+            except Exception:
+                ratings = {}
         return [
             {
                 **dict(row["payload"]),
                 "id": str(row["id"]),
                 "conversation_id": conversation_id,
+                **({"feedback": ratings[str(row["id"])]} if str(row["id"]) in ratings else {}),
             }
             for row in rows
         ]
@@ -752,11 +768,18 @@ class MemoryConversationStore:
         await self.flush(conversation_id)
 
     async def messages(self, conversation_id: str) -> list[dict[str, Any]]:
+        ratings = {
+            str(item.get("message_id")): str(item.get("rating"))
+            for item in self._feedback
+            if item.get("conversation_id") == conversation_id and item.get("message_id")
+        }
         return [
             {
                 **dict(item),
                 "id": str(item.get("id") or f"m{index}"),
                 "conversation_id": conversation_id,
+                **({"feedback": ratings[str(item.get("id") or f'm{index}')]}
+                   if str(item.get("id") or f"m{index}") in ratings else {}),
             }
             for index, item in enumerate(self._messages.get(conversation_id, []))
         ]
